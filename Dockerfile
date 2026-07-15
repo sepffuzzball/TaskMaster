@@ -30,10 +30,13 @@ COPY apps/web/index.html apps/web/index.html
 COPY packages/db/src packages/db/src
 COPY packages/shared/src packages/shared/src
 
-# Compile TypeScript for API, DB, Shared packages
-RUN npm -w apps/api exec tsc -- --build tsconfig.json
-RUN npm -w packages/db exec tsc -- --build tsconfig.json
+# Compile shared package first (its compiled dist is needed by db and api)
+COPY apps/web/vite.config.ts apps/web/vite.config.ts
 RUN npm -w packages/shared exec tsc -- --build tsconfig.json
+RUN npm -w packages/db exec tsc -- --build tsconfig.json
+
+# Compile API (depends on shared and db compiled dist)
+RUN npm -w apps/api exec tsc -- --build tsconfig.json
 
 # Compile web TypeScript and run Vite production build
 RUN npm -w apps/web exec tsc -- --build tsconfig.build.json

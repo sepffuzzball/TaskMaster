@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "node scripts/dev.js",
     "dev:web": "npm -w apps/web exec vite",
-    "build": "npm -w apps/api exec tsc -- --build tsconfig.json && npm -w apps/web exec tsc -- --build tsconfig.build.json && npm -w apps/web exec vite build && npm -w packages/db exec tsc -- --build tsconfig.json && npm -w packages/shared exec tsc -- --build tsconfig.json",
+    "build": "npm -w packages/shared exec tsc -- --build tsconfig.json && npm -w packages/db exec tsc -- --build tsconfig.json && npm -w apps/api exec tsc -- --build tsconfig.json && npm -w apps/web exec tsc -- --build tsconfig.build.json && npm -w apps/web exec vite build",
     "start": "npm -w apps/api exec node dist/server.js",
     "typecheck": "npm -w apps/api exec tsc -- --noEmit --project tsconfig.json && npm -w apps/web exec tsc -- --noEmit --project tsconfig.json && npm -w packages/db exec tsc -- --noEmit --project tsconfig.json && npm -w packages/shared exec tsc -- --noEmit --project tsconfig.json",
     "lint": "eslint .",
