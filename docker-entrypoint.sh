@@ -11,7 +11,7 @@ export DB_DIALECT="${DB_DIALECT:-sqlite}"
 if [ "$DB_DIALECT" = "sqlite" ]; then
     export SQLITE_PATH="${SQLITE_PATH:-/data/taskmaster.db}"
     mkdir -p "$(dirname "$SQLITE_PATH")"
-    # Ensure the user (appuser) can write to it
+    # Ensure the user (node) can write to it
     touch "$SQLITE_PATH"
 fi
 

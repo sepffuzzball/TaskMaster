@@ -71,10 +71,9 @@ COPY --from=builder /build/packages/shared/dist /app/packages/shared/dist
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY .env.example /app/.env.example
 
-# Create non-root user
-RUN useradd -m -u 1000 appuser && \
-    mkdir -p /data && \
-    chown -R appuser:appuser /app /data
+# Create /data and chown to existing node user
+RUN mkdir -p /data && \
+    chown -R node:node /app /data
 
 # Set environment defaults (absolute WEB_DIST path)
 ENV NODE_ENV=production \
@@ -87,8 +86,8 @@ ENV NODE_ENV=production \
 # Expose port 3000
 EXPOSE 3000
 
-# Switch to non-root user
-USER appuser
+# Switch to non-root user (existing node from node:22-slim)
+USER node
 
 # Healthcheck on API health route
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
