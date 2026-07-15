@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "paths": {
+      "@taskmaster/shared": ["../../packages/shared/src"],
+      "@taskmaster/db": ["../../packages/db/src"]
+    }
+  },
+  "include": ["src"],
+  "exclude": ["dist"]
+}

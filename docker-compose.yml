@@ -1,0 +1,35 @@
+services:
+  taskmaster:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: taskmaster:latest
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
+      DB_DIALECT: ${DB_DIALECT:-sqlite}
+      SQLITE_PATH: /data/taskmaster.db
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-http://localhost:3000/api/v1/auth/callback}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      # Optional dev bypass
+      DEV_AUTH_BYPASS: ${DEV_AUTH_BYPASS:-}
+    volumes:
+      - taskmaster_data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/v1/health').then(r => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  taskmaster_data:

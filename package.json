@@ -1,0 +1,35 @@
+{
+  "name": "taskmaster",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "dev:web": "npm -w apps/web exec vite",
+    "build": "npm -w apps/api exec tsc -- --build tsconfig.json && npm -w apps/web exec tsc -- --build tsconfig.build.json && npm -w apps/web exec vite build && npm -w packages/db exec tsc -- --build tsconfig.json && npm -w packages/shared exec tsc -- --build tsconfig.json",
+    "start": "npm -w apps/api exec node dist/server.js",
+    "typecheck": "npm -w apps/api exec tsc -- --noEmit --project tsconfig.json && npm -w apps/web exec tsc -- --noEmit --project tsconfig.json && npm -w packages/db exec tsc -- --noEmit --project tsconfig.json && npm -w packages/shared exec tsc -- --noEmit --project tsconfig.json",
+    "lint": "eslint .",
+    "test": "npm -w apps/api exec vitest run && npm -w apps/web exec vitest run && npm -w packages/db exec vitest run && npm -w packages/shared exec vitest run",
+    "db:migrate": "npm -w packages/db exec node dist/migrations/run.js",
+    "smoke:test": "bash scripts/smoke-test.sh"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.20.0",
+    "eslint": "^9.20.0",
+    "eslint-config-prettier": "^10.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.21.5": true
+  }
+}
