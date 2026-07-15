@@ -45,6 +45,9 @@ RUN npm -w apps/web exec vite build -- --outDir dist
 # --- Runtime stage: minimal production image ---
 FROM node:22-slim AS runtime
 
+# Set working directory for runtime
+WORKDIR /app
+
 # Copy everything needed from builder
 
 # First, copy package files and install production dependencies (including workspace resolution)
@@ -83,9 +86,6 @@ ENV NODE_ENV=production \
 
 # Expose port 3000
 EXPOSE 3000
-
-# Set working directory
-WORKDIR /app
 
 # Switch to non-root user
 USER appuser
