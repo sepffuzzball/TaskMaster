@@ -67,6 +67,13 @@ export interface ApiTokenRow {
   updated_at: string;
 }
 
+// --- Default lane spec ---
+const DEFAULT_LANES_SPEC = [
+  { name: 'ToDo', rank: 0 },
+  { name: 'InProgress', rank: 10 },
+  { name: 'Complete', rank: 20 },
+] as const;
+
 // --- Error class ---
 
 export class ApiError extends Error {
@@ -166,15 +173,33 @@ export class Repository {
   async createProject(ownerId: string, name: string, description?: string): Promise<ProjectRow> {
     const id = randomUUID();
     const now = new Date().toISOString();
-    const rank = await this.getNextProjectRank(ownerId);
-    await sql`
-      INSERT INTO projects (id, owner_id, name, description, archived_at, rank, version, created_at, updated_at)
-      VALUES (${id}, ${ownerId}, ${name}, ${description || null}, NULL, ${rank}, 0, ${now}, ${now})
-    `.execute(this.db);
-    return {
-      id, owner_id: ownerId, name, description: description || null,
-      archived_at: null, rank, version: 0, created_at: now, updated_at: now,
-    };
+    return this.transaction(async (trx) => {
+      // Calculate next project rank within transaction (no self-deadlock)
+      const rankResult = await sql`
+        SELECT rank FROM projects WHERE owner_id = ${ownerId} ORDER BY rank DESC LIMIT 1
+      `.execute(trx as any);
+      const rankRows = rankResult.rows as any[];
+      const rank = ((rankRows[0]?.rank as number) ?? -10) + 10;
+
+      await sql`
+        INSERT INTO projects (id, owner_id, name, description, archived_at, rank, version, created_at, updated_at)
+        VALUES (${id}, ${ownerId}, ${name}, ${description || null}, NULL, ${rank}, 0, ${now}, ${now})
+      `.execute(trx as any);
+
+      // Create default lanes atomically
+      for (const lane of DEFAULT_LANES_SPEC) {
+        const laneId = randomUUID();
+        await sql`
+          INSERT INTO lanes (id, project_id, name, rank, version, created_at, updated_at)
+          VALUES (${laneId}, ${id}, ${lane.name}, ${lane.rank}, 0, ${now}, ${now})
+        `.execute(trx as any);
+      }
+
+      return {
+        id, owner_id: ownerId, name, description: description || null,
+        archived_at: null, rank, version: 0, created_at: now, updated_at: now,
+      };
+    });
   }
 
   async getProjectById(projectId: string): Promise<ProjectRow | null> {
@@ -690,28 +715,24 @@ export class Repository {
         VALUES (${projectId}, ${ownerId}, ${projectName}, NULL, NULL, ${projectRank}, 0, ${now}, ${now})
       `.execute(trx as any);
 
-      // Create 3 lanes
-      const backlogId = randomUUID();
-      await sql`
-        INSERT INTO lanes (id, project_id, name, rank, version, created_at, updated_at)
-        VALUES (${backlogId}, ${projectId}, 'Backlog', 0, 0, ${now}, ${now})
-      `.execute(trx as any);
+      // Create 3 lanes with the correct names
+      for (const lane of DEFAULT_LANES_SPEC) {
+        const laneId = randomUUID();
+        await sql`
+          INSERT INTO lanes (id, project_id, name, rank, version, created_at, updated_at)
+          VALUES (${laneId}, ${projectId}, ${lane.name}, ${lane.rank}, 0, ${now}, ${now})
+        `.execute(trx as any);
+      }
 
-      const inProgressId = randomUUID();
-      await sql`
-        INSERT INTO lanes (id, project_id, name, rank, version, created_at, updated_at)
-        VALUES (${inProgressId}, ${projectId}, 'In Progress', 10, 0, ${now}, ${now})
+      // Move the task to the new project's ToDo lane with rank 0
+      const lanesResult2 = await sql`
+        SELECT id FROM lanes WHERE project_id = ${projectId} AND name = 'ToDo' ORDER BY rank ASC LIMIT 1
       `.execute(trx as any);
+      const todoLane = (lanesResult2.rows as any[])[0];
+      if (!todoLane) throw new ApiError(400, 'BAD_REQUEST', 'ToDo lane not found');
 
-      const doneId = randomUUID();
-      await sql`
-        INSERT INTO lanes (id, project_id, name, rank, version, created_at, updated_at)
-        VALUES (${doneId}, ${projectId}, 'Done', 20, 0, ${now}, ${now})
-      `.execute(trx as any);
-
-      // Move the task to the new project's backlog lane with version check
       const updateResult = await sql`
-        UPDATE tasks SET project_id = ${projectId}, lane_id = ${backlogId},
+        UPDATE tasks SET project_id = ${projectId}, lane_id = ${todoLane.id},
           rank = 0, updated_at = ${now}, version = version + 1
         WHERE id = ${taskId} AND version = ${expectedVersion}
       `.execute(trx as any);

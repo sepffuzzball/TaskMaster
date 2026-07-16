@@ -124,6 +124,38 @@ describe('API behavior tests', () => {
     expect(newProj?.owner_id).toBe(userRow.id);
   });
 
+  it('project creation creates default lanes with ToDo/InProgress/Complete', async () => {
+    const userRow = await repo.upsertUser('def-lane-user', 'def-lane-subj');
+    const project = await repo.createProject(userRow.id, 'DefLaneProj');
+    expect(project.version).toBe(0);
+    // Lanes should be created automatically
+    const lanes = await repo.listLanes(project.id);
+    expect(lanes.length).toBe(3);
+    expect(lanes[0].name).toBe('ToDo');
+    expect(lanes[0].rank).toBe(0);
+    expect(lanes[1].name).toBe('InProgress');
+    expect(lanes[1].rank).toBe(10);
+    expect(lanes[2].name).toBe('Complete');
+    expect(lanes[2].rank).toBe(20);
+  });
+
+  it('move-to-new-project creates new project with default lanes and moves task to ToDo', async () => {
+    const userRow = await repo.upsertUser('move-new2-user', 'move-new2-subj');
+    const project = await repo.createProject(userRow.id, 'MoveNew2Orig');
+    const lanes = await repo.listLanes(project.id);
+    const task = await repo.createTask(project.id, lanes[0].id, 'MoveMe2');
+    const moved = await repo.moveTaskToNewProject(task.id, 'MoveNew2Dest', task.version, userRow.id);
+    // Verify new project has default lanes
+    const newLanes = await repo.listLanes(moved.project_id);
+    expect(newLanes.length).toBe(3);
+    expect(newLanes[0].name).toBe('ToDo');
+    expect(newLanes[1].name).toBe('InProgress');
+    expect(newLanes[2].name).toBe('Complete');
+    // Verify the task moved to the ToDo lane
+    const movedTask = await repo.getTaskById(moved.id);
+    expect(movedTask!.lane_id).toBe(newLanes[0].id);
+  });
+
   it('token hash not returned on list (but hash stored)', async () => {
     const userRow = await repo.upsertUser('token-user', 'token-subj');
     const tokenResult = await repo.createApiToken(userRow.id, 'token-name', ['read']);
@@ -447,36 +479,32 @@ describe('API behavior tests', () => {
     it('deletes lane and moves tasks to specified target lane', async () => {
       const userRow = await repo.upsertUser('delete-lane-user', 'delete-lane-subj');
       const project = await repo.createProject(userRow.id, 'DeleteLaneProj');
-      const projVer0 = await getProjectVersion(project.id);
-      const lane1 = await repo.createLane(project.id, 'Backlog', projVer0, 0);
-      const projVer1 = await getProjectVersion(project.id);
-      const lane2 = await repo.createLane(project.id, 'In Progress', projVer1, 10);
-      const task1 = await repo.createTask(project.id, lane1.id, 'Task1');
-      const task2 = await repo.createTask(project.id, lane1.id, 'Task2');
-      // Delete lane1, move tasks to lane2
-      const projVer2 = await getProjectVersion(project.id);
-      await repo.deleteLane(project.id, lane1.id, lane2.id, projVer2);
+      // Use existing default lanes (ToDo, InProgress, Complete)
+      const defaultLanes = await repo.listLanes(project.id);
+      // Create a task in the first lane (ToDo)
+      const task1 = await repo.createTask(project.id, defaultLanes[0].id, 'Task1');
+      const task2 = await repo.createTask(project.id, defaultLanes[0].id, 'Task2');
+      // Delete ToDo lane, move tasks to InProgress lane
+      const projVerAfterLanes = await getProjectVersion(project.id);
+      await repo.deleteLane(project.id, defaultLanes[0].id, defaultLanes[1].id, projVerAfterLanes);
       const tasksAfter = await repo.listTasks(project.id);
       expect(tasksAfter.length).toBe(2);
       for (const t of tasksAfter) {
-        expect(t.lane_id).toBe(lane2.id);
+        expect(t.lane_id).toBe(defaultLanes[1].id);
       }
-      // lane1 should be deleted
+      // ToDo lane should be deleted
       const lanesAfter = await repo.listLanes(project.id);
-      expect(lanesAfter.length).toBe(1);
-      expect(lanesAfter[0].id).toBe(lane2.id);
+      expect(lanesAfter.length).toBe(2);
+      expect(lanesAfter.map((l: any) => l.name)).not.toContain('ToDo');
     });
 
     it('rejects deleting into same lane', async () => {
       const userRow = await repo.upsertUser('delete-same-user', 'delete-same-subj');
       const project = await repo.createProject(userRow.id, 'DeleteSameProj');
-      const projVer0 = await getProjectVersion(project.id);
-      const lane1 = await repo.createLane(project.id, 'Backlog', projVer0, 0);
-      const projVer1 = await getProjectVersion(project.id);
-      const lane2 = await repo.createLane(project.id, 'In Progress', projVer1, 10);
-      const projVer2 = await getProjectVersion(project.id);
+      const defaultLanes = await repo.listLanes(project.id);
+      const projVerAfterCreations = await getProjectVersion(project.id);
       try {
-        await repo.deleteLane(project.id, lane1.id, lane1.id, projVer2);
+        await repo.deleteLane(project.id, defaultLanes[0].id, defaultLanes[0].id, projVerAfterCreations);
         expect.fail('Should throw');
       } catch (e: any) {
         expect(e.code).toBe('BAD_REQUEST');
@@ -487,14 +515,10 @@ describe('API behavior tests', () => {
     it('rejects with stale project version', async () => {
       const userRow = await repo.upsertUser('stale-lane-user', 'stale-lane-subj');
       const project = await repo.createProject(userRow.id, 'StaleLaneProj');
-      const projVer0 = await getProjectVersion(project.id);
-      const lane1 = await repo.createLane(project.id, 'Backlog', projVer0, 0);
-      const projVer1 = await getProjectVersion(project.id);
-      const lane2 = await repo.createLane(project.id, 'In Progress', projVer1, 10);
-      const projVer2 = await getProjectVersion(project.id);
+      const defaultLanes = await repo.listLanes(project.id);
       // Wrong project version
       try {
-        await repo.deleteLane(project.id, lane1.id, lane2.id, 999);
+        await repo.deleteLane(project.id, defaultLanes[0].id, defaultLanes[1].id, 999);
         expect.fail('Should throw');
       } catch (e: any) {
         expect(e.code).toBe('STALE_VERSION');
@@ -505,13 +529,10 @@ describe('API behavior tests', () => {
     it('rejects with non-existent destination lane', async () => {
       const userRow = await repo.upsertUser('bad-dest-lane-user', 'bad-dest-lane-subj');
       const project = await repo.createProject(userRow.id, 'BadDestProj');
-      const projVer0 = await getProjectVersion(project.id);
-      const lane1 = await repo.createLane(project.id, 'Backlog', projVer0, 0);
-      const projVer1 = await getProjectVersion(project.id);
-      const lane2 = await repo.createLane(project.id, 'In Progress', projVer1, 10);
-      const projVer2 = await getProjectVersion(project.id);
+      const defaultLanes = await repo.listLanes(project.id);
+      const projVerAfterCreations = await getProjectVersion(project.id);
       try {
-        await repo.deleteLane(project.id, lane1.id, randomUUID(), projVer2);
+        await repo.deleteLane(project.id, defaultLanes[0].id, randomUUID(), projVerAfterCreations);
         expect.fail('Should throw');
       } catch (e: any) {
         expect(e.code).toBe('NOT_FOUND');
@@ -731,17 +752,23 @@ describe('API behavior tests', () => {
   it('rank rebalance test - unique stable ranks after reorder', async () => {
     const userRow = await repo.upsertUser('rank-rebalance', 'rank-rebalance-sub');
     const project = await repo.createProject(userRow.id, 'RankRebalanceProj');
-    // Create lanes with close ranks (gap 1)
+    // Get default lanes and create additional lanes to trigger rebalance
+    const defaultLanes = await repo.listLanes(project.id);
+    // Create 3 more lanes with close ranks (gap 1)
     const projVer0 = await getProjectVersion(project.id);
-    const lane1 = await repo.createLane(project.id, 'Lane1', projVer0, 0);
+    const lane1 = await repo.createLane(project.id, 'Lane1', projVer0, 0); // will cause rank clash
     const projVer1 = await getProjectVersion(project.id);
-    const lane2 = await repo.createLane(project.id, 'Lane2', projVer1, 1); // gap=1, will trigger rebalance
+    const lane2 = await repo.createLane(project.id, 'Lane2', projVer1, 1);
     const projVer2 = await getProjectVersion(project.id);
-    const lane3 = await repo.createLane(project.id, 'Lane3', projVer2, 2); // gap=1
-    // Reorder in reverse order to ensure stable unique ranks
+    const lane3 = await repo.createLane(project.id, 'Lane3', projVer2, 2);
+    // Now we have 6 lanes. Get all lane IDs
+    const allLanes = await repo.listLanes(project.id);
+    const allLaneIds = allLanes.map((l: any) => l.id);
+    // Reorder all lanes in reverse of their natural order
+    const reorderedIds = [allLaneIds[5], allLaneIds[4], allLaneIds[3], allLaneIds[2], allLaneIds[1], allLaneIds[0]];
     const projectBefore = await repo.getProjectById(project.id);
     const version0 = projectBefore!.version;
-    await repo.reorderLanes(project.id, [lane3.id, lane2.id, lane1.id], version0);
+    await repo.reorderLanes(project.id, reorderedIds, version0);
     // Read back lanes
     const lanes = await repo.listLanes(project.id);
     // All ranks should be unique and in increasing order
@@ -751,7 +778,7 @@ describe('API behavior tests', () => {
     expect(new Set(ranks).size).toBe(ranks.length);
     // Reorder again to verify stable behavior
     const projectMid = await repo.getProjectById(project.id);
-    await repo.reorderLanes(project.id, [lane1.id, lane2.id, lane3.id], projectMid!.version);
+    await repo.reorderLanes(project.id, allLaneIds, projectMid!.version);
     const lanes2 = await repo.listLanes(project.id);
     const ranks2 = lanes2.map((l: any) => l.rank);
     const sortedRanks2 = [...ranks2].sort((a, b) => a - b);

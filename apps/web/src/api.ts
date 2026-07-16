@@ -52,13 +52,13 @@ export const api = {
       request<Lane[]>(`/projects/${projectId}/lanes`),
     get: (projectId: string, laneId: string) =>
       request<Lane>(`/projects/${projectId}/lanes/${laneId}`),
-    create: (projectId: string, data: { name: string; rank?: number }) =>
+    create: (projectId: string, data: { name: string; rank?: number; expectedProjectVersion: number }) =>
       request<Lane>(`/projects/${projectId}/lanes`, { method: 'POST', body: JSON.stringify(data) }),
-    rename: (projectId: string, laneId: string, data: { name?: string; expectedVersion: number }) =>
+    rename: (projectId: string, laneId: string, data: { name?: string; expectedVersion: number; expectedProjectVersion: number }) =>
       request<Lane>(`/projects/${projectId}/lanes/${laneId}`, { method: 'PUT', body: JSON.stringify(data) }),
-    reorder: (projectId: string, data: { laneIds: string[]; expectedVersion: number }) =>
+    reorder: (projectId: string, data: { laneIds: string[]; expectedProjectVersion: number }) =>
       request<{ success: boolean }>(`/projects/${projectId}/lanes/reorder`, { method: 'POST', body: JSON.stringify(data) }),
-    delete: (projectId: string, laneId: string, data: { targetLaneId: string; expectedVersion: number }) =>
+    delete: (projectId: string, laneId: string, data: { targetLaneId: string; expectedProjectVersion: number }) =>
       request<{ success: boolean }>(`/projects/${projectId}/lanes/${laneId}`, {
         method: 'DELETE',
         body: JSON.stringify(data),

@@ -24,14 +24,14 @@ export async function registerMcpRoutes(app: FastifyInstance) {
   const emptyInput = z.object({});
   const projectIdInput = z.object({ projectId: z.string(), expectedVersion: z.number().int().optional() });
   const createProjectInput = z.object({ name: z.string(), description: z.string().optional() });
-  const createLaneInput = z.object({ projectId: z.string(), name: z.string(), rank: z.number().int().optional() });
-  const renameLaneInput = z.object({ laneId: z.string(), projectId: z.string(), name: z.string(), expectedVersion: z.number().int() });
-  const reorderLanesInput = z.object({ projectId: z.string(), laneIds: z.array(z.string()), expectedVersion: z.number().int() });
+  const createLaneInput = z.object({ projectId: z.string(), name: z.string(), rank: z.number().int().optional(), expectedProjectVersion: z.number().int() });
+  const renameLaneInput = z.object({ laneId: z.string(), projectId: z.string(), name: z.string(), expectedVersion: z.number().int(), expectedProjectVersion: z.number().int() });
+  const reorderLanesInput = z.object({ projectId: z.string(), laneIds: z.array(z.string()), expectedProjectVersion: z.number().int() });
   const listTasksInput = z.object({ projectId: z.string(), laneId: z.string().optional() });
   const createTaskInput = z.object({ projectId: z.string(), laneId: z.string(), title: z.string(), description: z.string().optional() });
   const updateTaskInput = z.object({ taskId: z.string(), title: z.string().optional(), description: z.string().optional(), expectedVersion: z.number().int() });
   const moveTaskInput = z.object({ taskId: z.string(), destinationProjectId: z.string(), destinationLaneId: z.string().optional(), beforeTaskId: z.string().optional(), afterTaskId: z.string().optional(), expectedVersion: z.number().int() });
-  const deleteLaneInput = z.object({ projectId: z.string(), laneId: z.string(), destinationLaneId: z.string(), expectedVersion: z.number().int() });
+  const deleteLaneInput = z.object({ projectId: z.string(), laneId: z.string(), destinationLaneId: z.string(), expectedProjectVersion: z.number().int() });
   const moveTaskToNewProjectInput = z.object({ taskId: z.string(), projectName: z.string(), expectedVersion: z.number().int() });
 
   // Create initial server for tool registration (template)
@@ -119,7 +119,7 @@ export async function registerMcpRoutes(app: FastifyInstance) {
     }, async (args: any, extra: any) => {
       assertWriteScopes(extra.authInfo, 'rename_lane');
       const ownerId = extra.authInfo?.token || 'bypass';
-      const validated = shared.UpdateLaneInput.parse({ name: args.name, expectedVersion: args.expectedVersion });
+      const validated = shared.UpdateLaneInput.parse({ name: args.name, expectedVersion: args.expectedVersion, expectedProjectVersion: args.expectedProjectVersion });
       const lane = await services.renameLane(args.laneId, args.projectId, ownerId, validated);
       return { content: [{ type: 'text', text: JSON.stringify(lane) }] };
     });
@@ -130,7 +130,7 @@ export async function registerMcpRoutes(app: FastifyInstance) {
     }, async (args: any, extra: any) => {
       assertWriteScopes(extra.authInfo, 'reorder_lane');
       const ownerId = extra.authInfo?.token || 'bypass';
-      const validated = shared.ReorderLanesInput.parse({ laneIds: args.laneIds, expectedVersion: args.expectedVersion });
+      const validated = shared.ReorderLanesInput.parse({ laneIds: args.laneIds, expectedProjectVersion: args.expectedProjectVersion });
       await services.reorderLanes(args.projectId, ownerId, validated);
       return { content: [{ type: 'text', text: 'Success' }] };
     });
@@ -141,7 +141,7 @@ export async function registerMcpRoutes(app: FastifyInstance) {
     }, async (args: any, extra: any) => {
       assertWriteScopes(extra.authInfo, 'delete_lane');
       const ownerId = extra.authInfo?.token || 'bypass';
-      const validated = shared.DeleteLaneInput.parse({ targetLaneId: args.destinationLaneId, expectedVersion: args.expectedVersion });
+      const validated = shared.DeleteLaneInput.parse({ targetLaneId: args.destinationLaneId, expectedProjectVersion: args.expectedProjectVersion });
       await services.deleteLane(args.projectId, ownerId, args.laneId, validated);
       return { content: [{ type: 'text', text: 'Success' }] };
     });

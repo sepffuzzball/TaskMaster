@@ -206,7 +206,7 @@ function BoardContent({ projectId, sidebarOpen, onToggleSidebar }: { projectId: 
   });
 
   const createLaneMut = useMutation({
-    mutationFn: (data: { name: string }) => api.lanes.create(projectId, data),
+    mutationFn: (data: { name: string }) => api.lanes.create(projectId, { ...data, expectedProjectVersion: project.version }),
     onSuccess: (lane) => {
       queryClient.invalidateQueries({ queryKey: ['lanes', projectId] });
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
@@ -217,7 +217,7 @@ function BoardContent({ projectId, sidebarOpen, onToggleSidebar }: { projectId: 
 
   const renameLaneMut = useMutation({
     mutationFn: ({ laneId, name, expectedVersion }: { laneId: string; name: string; expectedVersion: number }) =>
-      api.lanes.rename(projectId, laneId, { name, expectedVersion }),
+      api.lanes.rename(projectId, laneId, { name, expectedVersion, expectedProjectVersion: project.version }),
     onSuccess: (lane) => {
       queryClient.invalidateQueries({ queryKey: ['lanes', projectId] });
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
@@ -364,7 +364,7 @@ function BoardContent({ projectId, sidebarOpen, onToggleSidebar }: { projectId: 
     }
     const reordered = arrayMove(lanes, oldIndex, newIndex);
     const laneIds = reordered.map((l: Lane) => l.id);
-    api.lanes.reorder(projectId, { laneIds, expectedVersion: project.version }).then(() => {
+    api.lanes.reorder(projectId, { laneIds, expectedProjectVersion: project.version }).then(() => {
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       queryClient.invalidateQueries({ queryKey: ['lanes', projectId] });
       triggerToast('Lanes reordered', 'success');
@@ -375,7 +375,7 @@ function BoardContent({ projectId, sidebarOpen, onToggleSidebar }: { projectId: 
   const deleteLane = (laneId: string, targetLaneId: string) => {
     const lane = lanesQuery.data?.find((l: Lane) => l.id === laneId);
     if (!lane) return;
-    api.lanes.delete(projectId, laneId, { targetLaneId, expectedVersion: project.version }).then(() => {
+    api.lanes.delete(projectId, laneId, { targetLaneId, expectedProjectVersion: project.version }).then(() => {
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       queryClient.invalidateQueries({ queryKey: ['lanes', projectId] });
       triggerToast('Lane deleted', 'success');

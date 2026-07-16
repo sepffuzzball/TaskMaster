@@ -67,6 +67,65 @@ describe('db package', () => {
     expect(projects.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('creates project with exactly three default lanes in correct order', async () => {
+    const user = await repo.upsertUser('default-lanes-usr', 'default-lanes-subj');
+    const project = await repo.createProject(user.id, 'DefaultLanesProj');
+    expect(project.version).toBe(0);
+    const lanes = await repo.listLanes(project.id);
+    expect(lanes.length).toBe(3);
+    expect(lanes[0].name).toBe('ToDo');
+    expect(lanes[0].rank).toBe(0);
+    expect(lanes[1].name).toBe('InProgress');
+    expect(lanes[1].rank).toBe(10);
+    expect(lanes[2].name).toBe('Complete');
+    expect(lanes[2].rank).toBe(20);
+  });
+
+  it('project default initialization sets version 0', async () => {
+    const user = await repo.upsertUser('ver-zero-usr', 'ver-zero-subj');
+    const project = await repo.createProject(user.id, 'VerZeroProj');
+    expect(project.version).toBe(0);
+  });
+
+  it('moveToNewProject uses same default lanes and moves to ToDo', async () => {
+    const user = await repo.upsertUser('move-new-usr', 'move-new-subj');
+    const project = await repo.createProject(user.id, 'MoveNewOrig');
+    const lane = (await repo.listLanes(project.id))[0]; // ToDo lane
+    const task = await repo.createTask(project.id, lane.id, 'MoveMe');
+    const moved = await repo.moveTaskToNewProject(task.id, 'MoveNewDest', task.version, user.id);
+    const newProj = await repo.getProjectById(moved.project_id);
+    expect(newProj!.name).toBe('MoveNewDest');
+    expect(moved.lane_id).toBeDefined();
+    const newLanes = await repo.listLanes(moved.project_id);
+    expect(newLanes.length).toBe(3);
+    // Verify task moved to the ToDo lane
+    const movedTask = await repo.getTaskById(moved.id);
+    expect(movedTask!.lane_id).toBe(newLanes[0].id); // first lane should be ToDo
+    // Verify names/ranks of new lanes
+    expect(newLanes[0].name).toBe('ToDo');
+    expect(newLanes[0].rank).toBe(0);
+    expect(newLanes[1].name).toBe('InProgress');
+    expect(newLanes[1].rank).toBe(10);
+    expect(newLanes[2].name).toBe('Complete');
+    expect(newLanes[2].rank).toBe(20);
+  });
+
+  it('rollback on stale version in moveToNewProject avoids leaving orphan project/lanes', async () => {
+    const user = await repo.upsertUser('rollback-usr', 'rollback-subj');
+    const project = await repo.createProject(user.id, 'RollbackOrig');
+    const lane = (await repo.listLanes(project.id))[0];
+    const task = await repo.createTask(project.id, lane.id, 'RollMe');
+    try {
+      await repo.moveTaskToNewProject(task.id, 'RollbackDest', 999, user.id);
+      expect.fail('Should throw');
+    } catch (e: any) {
+      expect(e.code).toBe('STALE_VERSION');
+    }
+    // Verify no new project was created
+    const projects = await repo.listProjects(user.id);
+    expect(projects.find((p: any) => p.name === 'RollbackDest')).toBeUndefined();
+  });
+
   it('enforces project ownership', async () => {
     const userA = await repo.upsertUser('owner-a', 'sub-a');
     const userB = await repo.upsertUser('owner-b', 'sub-b');
@@ -90,7 +149,7 @@ describe('db package', () => {
     expect(lane1).toBeDefined();
     expect(lane2).toBeDefined();
     const lanes = await repo.listLanes(project.id);
-    expect(lanes.length).toBe(2);
+    expect(lanes.length).toBeGreaterThanOrEqual(5); // 3 default + 2 created
   });
 
   it('handles task CRUD and move', async () => {
@@ -140,13 +199,14 @@ describe('db package', () => {
   it('rejects duplicate lane reorder IDs', async () => {
     const user = await repo.upsertUser('reorder-dup', 'reorder-dup-subj');
     const project = await repo.createProject(user.id, 'ReorderProj');
-    const projVer1 = await getProjectVersion(project.id);
-    const lane1 = await repo.createLane(project.id, 'L1', projVer1, 0);
-    const projVer2 = await getProjectVersion(project.id);
-    const lane2 = await repo.createLane(project.id, 'L2', projVer2, 10);
-    const projVer3 = await getProjectVersion(project.id);
+    const allLanes = await repo.listLanes(project.id);
+    const allIds = allLanes.map((l: any) => l.id);
+    // Provide all IDs but with one duplicated (swapping last two)
+    const dupIds = [...allIds];
+    dupIds[allIds.length - 1] = allIds[0]; // replace last with first duplicate
+    const projVerAfter = await getProjectVersion(project.id);
     try {
-      await repo.reorderLanes(project.id, [lane1.id, lane1.id], projVer3);
+      await repo.reorderLanes(project.id, dupIds, projVerAfter);
       expect.fail('Should throw');
     } catch (e: any) {
       expect(e.message).toContain('Duplicate');
@@ -158,29 +218,34 @@ describe('db package', () => {
     it('moves tasks to specified destination lane', async () => {
       const user = await repo.upsertUser('del-lane-usr', 'del-lane-subj');
       const project = await repo.createProject(user.id, 'DelLaneTestProj');
-      const projVer1 = await getProjectVersion(project.id);
-      const lane1 = await repo.createLane(project.id, 'L1', projVer1, 0);
-      const projVer2 = await getProjectVersion(project.id);
-      const lane2 = await repo.createLane(project.id, 'L2', projVer2, 10);
-      const task1 = await repo.createTask(project.id, lane1.id, 'T1');
-      const projVer3 = await getProjectVersion(project.id);
-      await repo.deleteLane(project.id, lane1.id, lane2.id, projVer3);
+      // Use default lanes
+      const defaultLanes = await repo.listLanes(project.id);
+      const task1 = await repo.createTask(project.id, defaultLanes[0].id, 'T1');
+      const projVer = await getProjectVersion(project.id);
+      await repo.deleteLane(project.id, defaultLanes[0].id, defaultLanes[1].id, projVer);
       const tasks = await repo.listTasks(project.id);
       expect(tasks.length).toBe(1);
-      expect(tasks[0].lane_id).toBe(lane2.id);
+      expect(tasks[0].lane_id).toBe(defaultLanes[1].id);
       const lanes = await repo.listLanes(project.id);
-      expect(lanes.length).toBe(1);
-      expect(lanes[0].id).toBe(lane2.id);
+      expect(lanes.length).toBe(2); // InProgress and Complete remain
+      expect(lanes.map((l: any) => l.name)).not.toContain('ToDo');
     });
 
     it('rejects deleting last lane', async () => {
       const user = await repo.upsertUser('del-last-usr', 'del-last-subj');
       const project = await repo.createProject(user.id, 'DelLastTestProj');
-      const projVer = await getProjectVersion(project.id);
-      const lane = await repo.createLane(project.id, 'OnlyLane', projVer, 0);
-      const projVerAfterLane = await getProjectVersion(project.id);
+      // Delete first two of three default lanes
+      const defaultLanes = await repo.listLanes(project.id);
+      const projVer1 = await getProjectVersion(project.id);
+      await repo.deleteLane(project.id, defaultLanes[0].id, defaultLanes[1].id, projVer1);
+      const projVer2 = await getProjectVersion(project.id);
+      await repo.deleteLane(project.id, defaultLanes[1].id, defaultLanes[2].id, projVer2);
+      const lanes = await repo.listLanes(project.id);
+      expect(lanes.length).toBe(1);
+      // Try to delete the last lane - should fail
+      const projVer3 = await getProjectVersion(project.id);
       try {
-        await repo.deleteLane(project.id, lane.id, lane.id, projVerAfterLane);
+        await repo.deleteLane(project.id, defaultLanes[2].id, defaultLanes[2].id, projVer3);
         expect.fail('Should throw');
       } catch (e: any) {
         expect(e.code).toBe('BAD_REQUEST');

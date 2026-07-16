@@ -150,11 +150,11 @@ describe('App', () => {
       );
       expect(deleteCalls.length).toBeGreaterThan(0);
       const deleteBody = JSON.parse(deleteCalls[deleteCalls.length - 1][1].body);
-      expect(deleteBody.expectedVersion).toBe(5);
+      expect(deleteBody.expectedProjectVersion).toBe(5);
     });
   });
 
-  it('lane reorder request includes expectedVersion equal to project version', async () => {
+  it('lane reorder request includes expectedProjectVersion equal to project version', async () => {
     const mockedFetch = apiMock([
       {
         match: (url) => url.endsWith('/auth/me'),
@@ -198,7 +198,7 @@ describe('App', () => {
       );
       if (reorderCalls.length > 0) {
         const reorderBody = JSON.parse(reorderCalls[reorderCalls.length - 1][1].body);
-        expect(reorderBody.expectedVersion).toBe(42);
+        expect(reorderBody.expectedProjectVersion).toBe(42);
       }
     });
   });
@@ -493,12 +493,64 @@ describe('App', () => {
       expect(renameCalls.length).toBeGreaterThan(0);
       const renameBody = JSON.parse(renameCalls[renameCalls.length - 1][1].body);
       expect(renameBody.expectedVersion).toBe(2);  // lane version
+      expect(renameBody.expectedProjectVersion).toBe(10);  // project version
       // Check invalidations: project and lanes queries should be refetched
       const projectCallsAfterRename = vi.mocked(mockedFetch).mock.calls.filter(
         (call: any) => call[0].endsWith('/projects/proj1') && !call[0].includes('/tasks') && !call[0].includes('/lanes')
       );
       expect(projectCallsAfterRename.length).toBeGreaterThanOrEqual(2);
     });
+  });
+
+  it('lane create request includes expectedProjectVersion', async () => {
+    const mockedFetch = apiMock([
+      {
+        match: (url) => url.endsWith('/auth/me'),
+        response: () => mockFetchResponse({ id: '1', issuer: 'test', subject: 'test', createdAt: '', updatedAt: '' }),
+      },
+      {
+        match: (url) => url.endsWith('/projects') && !url.includes('/tasks') && !url.includes('/lanes'),
+        response: () => mockFetchResponse([{ id: 'proj1', name: 'Test Proj', version: 7, rank: 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' }]),
+      },
+      {
+        match: (url) => url.endsWith('/projects/proj1') && !url.includes('/tasks') && !url.includes('/lanes'),
+        response: () => mockFetchResponse({ id: 'proj1', name: 'Test Proj', version: 7, rank: 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' }),
+      },
+      {
+        match: (url) => url.includes('/lanes') && url.includes('/proj1'),
+        response: () => mockFetchResponse([
+          { id: 'lane1', name: 'Lane 1', version: 1, projectId: 'proj1', rank: 0, createdAt: '', updatedAt: '' },
+        ]),
+      },
+      {
+        match: (url) => url.includes('/tasks') && url.includes('/proj1'),
+        response: () => mockFetchResponse([]),
+      },
+      {
+        match: (url, opts) => url.includes('/lanes') && url.endsWith('/proj1/lanes') && opts?.method === 'POST',
+        response: () => mockFetchResponse({ id: 'lane2', name: 'Lane 2', version: 1, projectId: 'proj1', rank: 1 }),
+      },
+    ]);
+    global.fetch = mockedFetch;
+
+    renderApp();
+    await waitFor(() => screen.getByRole('button', { name: 'Test Proj' }));
+    const user = await userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Test Proj' }));
+    await waitFor(() => screen.getByText('Lane 1'));
+
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('New Lane');
+    await user.click(screen.getByRole('button', { name: /Add Lane/i }));
+    await waitFor(() => {
+      const createCalls = vi.mocked(mockedFetch).mock.calls.filter(
+        (call: any) => call[0].includes('/lanes') && call[0].endsWith('/proj1/lanes') && (call[1]?.method === 'POST')
+      );
+      if (createCalls.length > 0) {
+        const createBody = JSON.parse(createCalls[createCalls.length - 1][1].body);
+        expect(createBody.expectedProjectVersion).toBe(7);
+      }
+    });
+    promptSpy.mockRestore();
   });
 
   it('production root renders unauthenticated without external router', async () => {

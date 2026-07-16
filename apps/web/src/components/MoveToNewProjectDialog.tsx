@@ -44,8 +44,8 @@ export default function MoveToNewProjectDialog({ task, onClose }: {
                 .then((response: any) => {
                   queryClient.invalidateQueries({ queryKey: ['tasks', task.projectId] });
                   queryClient.invalidateQueries({ queryKey: ['projects'] });
-                  if (response?.id) {
-                    navigate(`/project/${response.id}`);
+                  if (response?.projectId) {
+                    navigate(`/project/${response.projectId}`);
                   }
                   triggerToast('Task moved to new project', 'success');
                   onClose();
