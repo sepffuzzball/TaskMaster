@@ -6,6 +6,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import App from './App';
 import { mockFetch } from './test/setup';
+import { Root } from './main';
 
 // Mock @dnd-kit/core to capture DndContext props for testing drag events
 vi.mock('@dnd-kit/core', async () => {
@@ -497,6 +498,24 @@ describe('App', () => {
         (call: any) => call[0].endsWith('/projects/proj1') && !call[0].includes('/tasks') && !call[0].includes('/lanes')
       );
       expect(projectCallsAfterRename.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('production root renders unauthenticated without external router', async () => {
+    // Ensure no external BrowserRouter is supplied - Root from main.tsx already includes one.
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ errors: [{ code: 'UNAUTHORIZED', message: 'Not authenticated' }] }),
+        headers: new Headers(),
+      } as Response)
+    );
+
+    render(<Root />);
+    await waitFor(() => {
+      const headings = screen.getAllByRole('heading');
+      expect(headings.some(h => h.textContent === 'Not authenticated')).toBe(true);
     });
   });
 });
