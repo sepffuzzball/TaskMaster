@@ -1,48 +1,86 @@
-import React, { useRef } from 'react';
-import { Edit, Trash, Move } from 'lucide-react';
+import { Edit, Trash, GripVertical } from 'lucide-react';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import type { Task } from '../types';
 
-export default function TaskCard({ task, projectId, onEdit, onDelete, onMove, onMoveToNewProject }: {
+type InsertIndicator = 'none' | 'before';
+
+export default function TaskCard({
+  task,
+  onEdit,
+  onDelete,
+  insertIndicator = 'none',
+  wholeLaneTarget = false,
+  dimmed = false,
+}: {
   task: Task;
-  projectId: string;
   onEdit: () => void;
   onDelete: () => void;
-  onMove: () => void;
-  onMoveToNewProject: () => void;
+  /** Show a crisp horizontal insertion line above this card. */
+  insertIndicator?: InsertIndicator;
+  /** Card is inside a lane currently acting as a whole-lane drop target. */
+  wholeLaneTarget?: boolean;
+  /** Visually de-emphasise non-active cards during drag (e.g. other lanes). */
+  dimmed?: boolean;
 }) {
-  const draggable = useDraggable({
-    id: task.id,
-    data: { type: 'task' },
-  });
-  const droppable = useDroppable({ id: task.id, data: { type: 'task' } });
-  const nodeRef = useRef<HTMLElement | null>(null);
+  const dragData = { type: 'task', taskId: task.id, title: task.title, laneId: task.laneId, version: task.version };
+  const draggable = useDraggable({ id: task.id, data: dragData });
+  const droppable = useDroppable({ id: task.id, data: dragData });
 
-  const comboRef = (el: HTMLElement | null) => {
+  // The article root is registered as both the draggable measurement node and
+  // the droppable target. It is intentionally NON-interactive (no role=button,
+  // no tabIndex, no keydown) so dnd-kit's keyboard sensor listeners live only
+  // on the dedicated drag handle button below, and so the article is not a
+  // button ancestor containing buttons.
+  const setArticleRef = (el: HTMLElement | null) => {
     draggable.setNodeRef(el);
     droppable.setNodeRef(el);
-    nodeRef.current = el;
   };
 
+  const className = [
+    'task-card',
+    draggable.isDragging ? 'dragging' : '',
+    droppable.isOver ? 'drop-target' : '',
+    wholeLaneTarget ? 'lane-drop-member' : '',
+    dimmed ? 'dimmed' : '',
+  ].filter(Boolean).join(' ');
+
   return (
-    <div
-      className={`task-card ${draggable.isDragging ? 'dragging' : ''}`}
-      ref={comboRef}
-      {...draggable.attributes}
-      {...draggable.listeners}
-      tabIndex={0}
-      onKeyDown={e => e.key === 'Enter' && onEdit()}
-    >
-      <div className="task-title">{task.title}</div>
-      {task.description && <div className="task-description">{task.description}</div>}
+    <article ref={setArticleRef} className={className} aria-label={`Task ${task.title}`}>
+      {insertIndicator === 'before' && <span className="task-insert-line" aria-hidden="true" />}
+      <div className="task-body">
+        <div className="task-title">{task.title}</div>
+        {task.description && <div className="task-description">{task.description}</div>}
+      </div>
       <div className="task-actions">
-        <button className="btn btn-secondary btn-small" onClick={e => { e.stopPropagation(); onEdit(); }} aria-label="Edit task"><Edit size={12} /> Edit</button>
-        <button className="btn btn-danger btn-small" onClick={e => { e.stopPropagation(); onDelete(); }} aria-label="Delete task"><Trash size={12} /> Delete</button>
-        <button className="btn btn-secondary btn-small" onClick={e => { e.stopPropagation(); onMove(); }} aria-label="Move task"><Move size={12} /> Move</button>
+        <button
+          type="button"
+          className="task-action-btn task-drag-handle"
+          {...draggable.attributes}
+          {...draggable.listeners}
+          aria-label={`Drag task ${task.title}`}
+          title={`Drag task ${task.title}`}
+        >
+          <GripVertical size={14} />
+        </button>
+        <button
+          type="button"
+          className="task-action-btn"
+          onClick={e => { e.stopPropagation(); onEdit(); }}
+          aria-label={`Edit task ${task.title}`}
+          title={`Edit task ${task.title}`}
+        >
+          <Edit size={14} />
+        </button>
+        <button
+          type="button"
+          className="task-action-btn danger"
+          onClick={e => { e.stopPropagation(); onDelete(); }}
+          aria-label={`Delete task ${task.title}`}
+          title={`Delete task ${task.title}`}
+        >
+          <Trash size={14} />
+        </button>
       </div>
-      <div className="task-actions" style={{ opacity: 1, marginTop: '4px' }}>
-        <button className="btn btn-secondary btn-small" onClick={e => { e.stopPropagation(); onMoveToNewProject(); }}>Move to new project</button>
-      </div>
-    </div>
+    </article>
   );
 }
