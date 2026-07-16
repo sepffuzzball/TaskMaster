@@ -53,10 +53,11 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       signed: true,
     });
 
-    // Build redirect URL
+    // Build redirect URL with standards-compliant scope
     const redirectUrl = buildAuthorizationUrl(config, {
       client_id: env.OIDC_CLIENT_ID,
       redirect_uri: env.OIDC_REDIRECT_URI,
+      scope: 'openid profile email',
       state,
       nonce,
       code_challenge: codeChallenge,

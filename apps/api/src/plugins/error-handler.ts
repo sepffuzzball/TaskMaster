@@ -35,7 +35,8 @@ export const errorHandlerPlugin = fastifyPlugin(async (fastify: FastifyInstance)
       return;
     }
 
-    // Handle generic errors - return sanitized 500
+    // Handle generic errors - log and return sanitized 500
+    request.log.error({ err: error }, 'Unhandled request error');
     reply.status(500).send({
       errors: [{ code: 'INTERNAL_ERROR', message: 'An internal error occurred' }],
     });

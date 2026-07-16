@@ -11,6 +11,7 @@ export default defineConfig({
     alias: {
       '@taskmaster/db': resolve(__dirname, '../../packages/db/src'),
       '@taskmaster/db/migrations/001-initial': resolve(__dirname, '../../packages/db/src/migrations/001-initial.ts'),
+      '@taskmaster/db/migrations/002-oidc-transactions': resolve(__dirname, '../../packages/db/src/migrations/002-oidc-transactions.ts'),
       '@taskmaster/shared': resolve(__dirname, '../../packages/shared/src'),
     },
   },

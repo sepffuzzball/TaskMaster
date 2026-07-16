@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
  * Custom MigrationProvider that filters filenames matching numeric migration
  * patterns and validates they export `up`/`down`.
  */
-class NumericFileMigrationProvider {
+export class NumericFileMigrationProvider {
   private migrationFolder: string;
 
   constructor(folder: string) {
@@ -30,8 +30,8 @@ class NumericFileMigrationProvider {
     const migrations: Record<string, Migration> = {};
 
     for (const file of files) {
-      // Only include files starting with digits followed by a dash (e.g. 001-initial.ts)
-      if (!/^\d+-[a-zA-Z]\w*\.(?:ts|js)$/.test(file)) continue;
+      // Only include files starting with digits-hyphen and then alphanumeric/underscore/hyphen chars (e.g. 002-oidc-transactions.ts)
+      if (!/^\d+-[-\w]+\.(?:ts|js)$/.test(file)) continue;
 
       const modulePath = path.resolve(this.migrationFolder, file);
       const moduleUrl = new URL('file://' + modulePath);
@@ -86,7 +86,12 @@ export async function run(): Promise<void> {
   }
 }
 
-run().catch((err) => {
-  console.error('Fatal migration error:', err);
-  process.exitCode = 1;
-});
+// Only auto-call run() when this module is the direct CLI entrypoint
+const entrypoint = fileURLToPath(import.meta.url);
+const args = process.argv[1];
+if (args && entrypoint === path.resolve(args)) {
+  run().catch((err) => {
+    console.error('Fatal migration error:', err);
+    process.exitCode = 1;
+  });
+}

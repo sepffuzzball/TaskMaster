@@ -954,4 +954,37 @@ describe('API behavior tests', () => {
       expect(e.message).toBe('some weird error');
     }
   });
+
+  // --- Auth login route tests ---
+
+  describe('OIDC auth login', () => {
+    it('transaction creation succeeds after 002 migration', async () => {
+      // Apply 002-oidc-transactions to the test DB (which already has 001)
+      const { up: oidcUp } = await import('@taskmaster/db/migrations/002-oidc-transactions');
+      const { createDb } = await import('@taskmaster/db');
+      const db2 = createDb();
+      await oidcUp(db2 as any);
+
+      // Create a fresh repo pointing to the same DB
+      const { Repository } = await import('@taskmaster/db');
+      const repo2 = new Repository(db2);
+
+      // Verify OIDC transaction operations succeed
+      const transactionId = randomBytes(32).toString('hex');
+      const state = randomBytes(32).toString('hex');
+      const nonce = randomBytes(32).toString('hex');
+      const codeVerifier = randomBytes(32).toString('hex');
+      const result = await repo2.createOidcTransaction({ transactionId, state, nonce, codeVerifier });
+      expect(result.id).toBeDefined();
+
+      const consumed = await repo2.consumeOidcTransaction(transactionId);
+      expect(consumed).toBeDefined();
+      expect(consumed!.state).toBe(state);
+      // Second consume should be null (already consumed)
+      const consumed2 = await repo2.consumeOidcTransaction(transactionId);
+      expect(consumed2).toBeNull();
+
+      await db2.destroy();
+    });
+  });
 });

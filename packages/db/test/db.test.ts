@@ -1,7 +1,10 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Repository, createDb, getDialect, ApiError, x0n } from '../dist/index.js';
 import { up as migrationUp, down as migrationDown } from '../dist/migrations/001-initial.js';
+import { sql } from 'kysely';
 import { randomUUID } from 'crypto';
+import path from 'path';
+import { unlinkSync } from 'node:fs';
 
 let repo: Repository;
 
@@ -22,6 +25,10 @@ describe('db package', () => {
     const db = createDb();
     await migrationUp(db);
     repo = new Repository(db);
+  });
+
+  afterAll(async () => {
+    // Clean up test DB - not needed since SQLite files are temp and random
   });
 
   it('exports Repository', () => {
@@ -237,6 +244,53 @@ describe('db package', () => {
     } finally {
       process.env.DB_DIALECT = origEnv.DB_DIALECT;
       process.env.DATABASE_URL = origEnv.DATABASE_URL;
+    }
+  });
+
+  // --- Migration regression tests ---
+
+  it('compiled migrator discovers and applies both 001-initial and 002-oidc-transactions', async () => {
+    // Use a unique temp SQLite file
+    const testDbPath = '/tmp/test-migration-db-' + randomUUID() + '.db';
+    process.env.DB_DIALECT = 'sqlite';
+    process.env.SQLITE_PATH = testDbPath;
+
+    // Create the DB and run migrator directly using the compiled provider (no side effects)
+    const db = createDb();
+    const { Migrator } = await import('kysely/migration');
+    const { NumericFileMigrationProvider } = await import('../dist/migrations/run.js');
+    const migrationsDir = path.resolve(__dirname, '..', 'dist', 'migrations');
+    const migrator = new Migrator({
+      db,
+      provider: new NumericFileMigrationProvider(migrationsDir),
+    });
+
+    try {
+      // First pass - must discover and apply both
+      const { results, error } = await migrator.migrateToLatest();
+      expect(error).toBeUndefined();
+      const appliedFirst = results?.filter(r => r.status === 'Success').map(r => r.migrationName) || [];
+      expect(appliedFirst).toContain('001-initial');
+      expect(appliedFirst).toContain('002-oidc-transactions');
+
+      // Verify oidc_transactions table exists
+      const txResult = await sql`
+        SELECT name FROM sqlite_master WHERE type='table' AND name='oidc_transactions'
+      `.execute(db);
+      const txRows = txResult.rows as any[];
+      expect(txRows.length).toBeGreaterThanOrEqual(1);
+
+      // Second pass - must apply nothing
+      const { results: results2, error: error2 } = await migrator.migrateToLatest();
+      expect(error2).toBeUndefined();
+      const appliedSecond = results2?.filter(r => r.status === 'Success').map(r => r.migrationName) || [];
+      expect(appliedSecond.length).toBe(0);
+    } finally {
+      await db.destroy();
+      // Clean up temp files
+      ['', '-wal', '-shm'].forEach(suffix => {
+        try { unlinkSync(testDbPath + suffix); } catch {}
+      });
     }
   });
 });
