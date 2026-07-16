@@ -38,18 +38,116 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata (tags, labels)
+      - name: Generate Docker metadata (tags, labels)
         id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          flavor: |
-            latest=auto
-          tags: |
-            type=ref,event=tag
-            type=ref,event=branch
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Normalize image name to lowercase
+          image="${IMAGE,,}"
+
+          # Determine ref tag
+          ref_name="$GITHUB_REF_NAME"
+          default_branch="$DEFAULT_BRANCH"
+          sha_short="${GITHUB_SHA::7}"
+
+          # ---------- Tags ----------
+          tags=()
+
+          # Always emit SHA tag
+          tags+=("${image}:sha-${sha_short}")
+
+          # Docker tag sanitization helper
+          sanitize_tag() {
+            local name="$1"
+            # Lowercase
+            name="${name,,}"
+            # Replace invalid chars (anything not a-z0-9.-_) with single '-'
+            name="${name//[^a-z0-9._-]/-}"
+            # Collapse multiple dashes iteratively
+            while [[ "$name" == *--* ]]; do
+              name="${name//--/-}"
+            done
+            # Trim leading/trailing invalid chars (dash/dot)
+            name="${name#[.-]}"
+            name="${name%[.-]}"
+            # Ensure first char is alphanumeric or underscore; prefix _ if needed
+            if ! [[ "$name" =~ ^[a-z0-9_] ]]; then
+              name="_${name}"
+            fi
+            # Cap at 128 chars max (Docker tag length limit)
+            name="${name::128}"
+            # Clean after truncation
+            name="${name%[.-]}"
+            name="${name#[.-]}"
+            # If only underscore remains (no meaningful content), skip
+            if [[ "$name" == "_" ]]; then
+              echo >&2 "::error::Empty tag after sanitization; SHA tag remains valid."
+              return 1
+            fi
+            echo "$name"
+          }
+
+          if [[ "$GITHUB_REF_TYPE" == "branch" ]]; then
+            tag="$(sanitize_tag "$ref_name")" || true
+            if [[ -n "$tag" ]]; then
+              tags+=("${image}:${tag}")
+            fi
+          fi
+
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$(sanitize_tag "$ref_name")" || true
+            if [[ -n "$tag" ]]; then
+              tags+=("${image}:${tag}")
+            fi
+          fi
+
+          # Emit 'latest' only for default branch
+          if [[ "$GITHUB_REF_TYPE" == "branch" && "$ref_name" == "$default_branch" ]]; then
+            tags+=("${image}:latest")
+          fi
+
+          # Deduplicate tags preserving order
+          deduped=()
+          declare -A seen
+          for t in "${tags[@]}"; do
+            if [[ -z "${seen[$t]:-}" ]]; then
+              seen[$t]=1
+              deduped+=("$t")
+            fi
+          done
+
+          # Output tags as multiline
+          {
+            echo "tags<<TAGS_MARKER"
+            printf '%s\n' "${deduped[@]}"
+            echo "TAGS_MARKER"
+          } >> "$GITHUB_OUTPUT"
+
+          # ---------- Labels ----------
+          created="$(date --utc --iso-8601=seconds)"
+          revision="$GITHUB_SHA"
+          source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
+          # Determine version label: use sanitized ref tag if available, else sha-short
+          if [[ -n "${tag:-}" ]]; then
+            version="${tag}"
+          else
+            version="sha-${sha_short}"
+          fi
+
+          {
+            echo "labels<<LABELS_MARKER"
+            printf 'org.opencontainers.image.created=%s\n' "$created"
+            printf 'org.opencontainers.image.revision=%s\n' "$revision"
+            printf 'org.opencontainers.image.source=%s\n' "$source"
+            printf 'org.opencontainers.image.version=%s\n' "$version"
+            echo "LABELS_MARKER"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
