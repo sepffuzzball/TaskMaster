@@ -216,4 +216,27 @@ describe('db package', () => {
     expect(migrationDown).toBeDefined();
     process.env.DB_DIALECT = 'sqlite';
   });
+
+  it('getDialect with postgres uses static ESM import, not require()', async () => {
+    // Set a syntactically valid (but dummy) DATABASE_URL
+    const origEnv = {
+      DB_DIALECT: process.env.DB_DIALECT,
+      DATABASE_URL: process.env.DATABASE_URL,
+    };
+    process.env.DB_DIALECT = 'postgres';
+    process.env.DATABASE_URL = 'postgresql://localhost:5432/test_db_dummy';
+
+    try {
+      // Calling getDialect() with postgres and a valid URL should succeed without
+      // throwing any require/ReferenceError. It returns a PostgresDialect object.
+      const dialect = getDialect();
+      expect(dialect).toBeDefined();
+      // The pool is created but no connection is attempted at this point.
+      // Cleanup: the pool will be garbage-collected; no explicit close needed
+      // because PostgresDialect does not expose the pool via its API.
+    } finally {
+      process.env.DB_DIALECT = origEnv.DB_DIALECT;
+      process.env.DATABASE_URL = origEnv.DATABASE_URL;
+    }
+  });
 });

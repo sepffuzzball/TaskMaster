@@ -1,5 +1,6 @@
 import { SqliteDialect, PostgresDialect } from 'kysely';
 import Database from 'better-sqlite3';
+import { Pool } from 'pg';
 
 export function getDialect() {
   const dialect = process.env.DB_DIALECT;
@@ -14,7 +15,6 @@ export function getDialect() {
   if (dialect === 'postgres') {
     const url = process.env.DATABASE_URL;
     if (!url) throw new Error('DATABASE_URL not set for postgres dialect');
-    const { Pool } = require('pg');
     const pool = new Pool({ connectionString: url });
     return new PostgresDialect({ pool });
   }
