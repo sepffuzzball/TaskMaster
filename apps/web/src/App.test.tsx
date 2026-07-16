@@ -12,7 +12,7 @@ import { Root } from './main';
 // The mock renders children inside the real InternalContext so useDraggable/useDroppable
 // don't crash, but it stores the handlers on window for tests to invoke synthetically.
 vi.mock('@dnd-kit/core', async () => {
-  const actual = await vi.importActual('@dnd-kit/core');
+  const actual: any = await vi.importActual('@dnd-kit/core');
   function MockDndContext(props: any) {
     (window as any).__dndOnDragEnd = props.onDragEnd;
     (window as any).__dndOnDragStart = props.onDragStart;
@@ -21,9 +21,28 @@ vi.mock('@dnd-kit/core', async () => {
     (window as any).__dndAccessibility = props.accessibility;
     return React.createElement('div', { 'data-testid': 'dnd-context' }, props.children);
   }
+  function MockUseDraggable(options: any) {
+    const result = actual.useDraggable(options);
+    const pointerListener = vi.fn();
+    const keyboardListener = vi.fn();
+    const activatorRef = vi.fn((node: HTMLElement | null) => result.setActivatorNodeRef(node));
+    const captures = ((window as any).__dndDraggables ??= {});
+    captures[String(options.id)] = { pointerListener, keyboardListener, activatorRef };
+    return {
+      ...result,
+      setActivatorNodeRef: activatorRef,
+      attributes: { ...result.attributes, 'data-dnd-draggable': String(options.id) },
+      listeners: { ...result.listeners, onPointerDown: pointerListener, onKeyDown: keyboardListener },
+    };
+  }
+  function MockUseDndMonitor(callbacks: any) {
+    (window as any).__dndMonitor = callbacks;
+  }
   return {
     ...actual,
     DndContext: MockDndContext,
+    useDraggable: MockUseDraggable,
+    useDndMonitor: MockUseDndMonitor,
   };
 });
 
@@ -37,6 +56,8 @@ afterEach(() => {
   (window as any).__dndOnDragCancel = undefined;
   (window as any).__dndOnDragOver = undefined;
   (window as any).__dndAccessibility = undefined;
+  (window as any).__dndDraggables = undefined;
+  (window as any).__dndMonitor = undefined;
   delete (window as any).matchMedia;
   // Reset window history so each test starts at "/" (BrowserRouter inherits the URL).
   window.history.replaceState({}, '', '/');
@@ -103,18 +124,19 @@ function apiMock(handlers: Array<{ match: (url: string, opts?: any) => boolean; 
 // `extra` handlers are placed FIRST so specific overrides (e.g. task GET,
 // move-to-new-project) take priority over the broad default list/projects/
 // lanes/tasks matchers.
-function boardMock(extra: Array<{ match: (url: string, opts?: any) => boolean; response: (url: string, opts?: any) => Promise<Response> }>, opts: { projectVersion?: number; lanes?: any[]; tasks?: any[] } = {}) {
+function boardMock(extra: Array<{ match: (url: string, opts?: any) => boolean; response: (url: string, opts?: any) => Promise<Response> }>, opts: { projectVersion?: number; lanes?: any[]; tasks?: any[]; projects?: any[] } = {}) {
   const projectVersion = opts.projectVersion ?? 1;
   const lanes = opts.lanes ?? [
     { id: 'lane1', name: 'Lane 1', version: 1, projectId: 'proj1', rank: 0, createdAt: '', updatedAt: '' },
     { id: 'lane2', name: 'Lane 2', version: 1, projectId: 'proj1', rank: 1, createdAt: '', updatedAt: '' },
   ];
   const tasks = opts.tasks ?? [];
+  const projects = opts.projects ?? [{ id: 'proj1', name: 'Test Proj', version: projectVersion, rank: 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' }];
   return apiMock([
     ...extra,
     { match: (url) => url.endsWith('/auth/me'), response: () => mockFetchResponse({ id: '1', issuer: 'test', subject: 'test', createdAt: '', updatedAt: '' }) },
-    { match: (url) => url.endsWith('/projects') && !url.includes('/tasks') && !url.includes('/lanes'), response: () => mockFetchResponse([{ id: 'proj1', name: 'Test Proj', version: projectVersion, rank: 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' }]) },
-    { match: (url) => url.endsWith('/projects/proj1') && !url.includes('/tasks') && !url.includes('/lanes'), response: () => mockFetchResponse({ id: 'proj1', name: 'Test Proj', version: projectVersion, rank: 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' }) },
+    { match: (url) => url.endsWith('/projects') && !url.includes('/tasks') && !url.includes('/lanes'), response: () => mockFetchResponse(projects) },
+    { match: (url) => url.endsWith('/projects/proj1') && !url.includes('/tasks') && !url.includes('/lanes'), response: () => mockFetchResponse(projects.find(project => project.id === 'proj1')) },
     { match: (url) => url.includes('/lanes') && url.includes('/proj1'), response: () => mockFetchResponse(lanes) },
     { match: (url) => url.includes('/tasks') && url.includes('/proj1'), response: () => mockFetchResponse(tasks) },
   ]);
@@ -689,7 +711,7 @@ describe('App', () => {
     await screen.findByRole('dialog', { name: 'Edit Task' });
   });
 
-  it('task card and lane expose labelled drag-handle buttons', async () => {
+  it('renders the task drag header before the body with Edit, rail, and Delete in order', async () => {
     const tasks = [
       { id: 'task1', title: 'Task 1', version: 1, projectId: 'proj1', laneId: 'lane1', rank: 0, createdAt: '', updatedAt: '' },
     ];
@@ -703,15 +725,73 @@ describe('App', () => {
 
     const taskHandle = screen.getByLabelText('Drag task Task 1');
     expect(taskHandle.tagName).toBe('BUTTON');
-    expect(taskHandle).toHaveClass('task-action-btn', 'task-drag-handle');
+    expect(taskHandle).toHaveClass('task-drag-rail');
     expect(screen.getByLabelText('Edit task Task 1')).toHaveClass('task-action-btn');
     expect(screen.getByLabelText('Delete task Task 1')).toHaveClass('task-action-btn', 'danger');
     expect(taskHandle).not.toHaveAttribute('tabindex', '-1');
     expect(taskHandle).not.toHaveAttribute('aria-hidden', 'true');
+    expect(taskHandle).toHaveAttribute('title', 'Drag task Task 1');
+    const card = taskHandle.closest('.task-card')!;
+    const header = card.querySelector('.task-card-header')!;
+    expect(Array.from(header.querySelectorAll('button')).map(button => button.getAttribute('aria-label'))).toEqual([
+      'Edit task Task 1', 'Drag task Task 1', 'Delete task Task 1',
+    ]);
+    expect(header.nextElementSibling).toHaveClass('task-body');
+    expect(card.querySelector('.task-actions')).toBeNull();
 
     const laneHandle = screen.getByLabelText('Reorder lane Lane 1');
     expect(laneHandle.tagName).toBe('BUTTON');
     expect(laneHandle).not.toHaveAttribute('aria-hidden', 'true');
+  });
+
+  it('delegates only blank header and rail interactions to task drag listeners', async () => {
+    const tasks = [{ id: 'task1', title: 'Task 1', version: 1, projectId: 'proj1', laneId: 'lane1', rank: 0, createdAt: '', updatedAt: '' }];
+    global.fetch = boardMock([{
+      match: url => url.includes('/projects/proj1/tasks/task1'),
+      response: () => mockFetchResponse(tasks[0]),
+    }], { lanes: [{ id: 'lane1', name: 'Lane 1', version: 1, projectId: 'proj1', rank: 0, createdAt: '', updatedAt: '' }], tasks });
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+    await screen.findByText('Task 1');
+
+    const header = document.querySelector('.task-card-header') as HTMLElement;
+    const edit = screen.getByLabelText('Edit task Task 1');
+    const rail = screen.getByLabelText('Drag task Task 1');
+    const remove = screen.getByLabelText('Delete task Task 1');
+    const capture = (window as any).__dndDraggables.task1;
+    expect(capture.activatorRef).toHaveBeenCalledWith(rail);
+    expect(rail).toHaveAttribute('data-dnd-draggable', 'task1');
+
+    fireEvent.pointerDown(header);
+    expect(capture.pointerListener).toHaveBeenCalledTimes(1);
+    fireEvent.pointerDown(rail);
+    fireEvent.keyDown(rail, { key: 'Enter', code: 'Enter' });
+    expect(capture.pointerListener).toHaveBeenCalledTimes(2);
+    expect(capture.keyboardListener).toHaveBeenCalledTimes(1);
+    fireEvent.pointerDown(edit);
+    fireEvent.click(edit);
+    expect(capture.pointerListener).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole('dialog', { name: 'Edit Task' })).toBeTruthy();
+    await user.click(screen.getByLabelText('Close edit task panel'));
+
+    fireEvent.pointerDown(remove);
+    fireEvent.click(remove);
+    expect(capture.pointerListener).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText('Delete this task?')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    edit.focus();
+    await user.keyboard('{Enter}');
+    expect(capture.pointerListener).toHaveBeenCalledTimes(2);
+    await screen.findByRole('dialog', { name: 'Edit Task' });
+    await user.click(screen.getByLabelText('Close edit task panel'));
+    remove.focus();
+    await user.keyboard(' ');
+    expect(capture.pointerListener).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText('Delete this task?')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
   });
 
   it('mobile menu toggle opens and closes the real sidebar', async () => {
@@ -826,7 +906,7 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
   });
 
-  it('task drag exposes only the compact mobile New Project shelf and keeps the sidebar closed', async () => {
+  it('task drag exposes the compact mobile destination tray and keeps the sidebar closed', async () => {
     setMobileViewport();
     const tasks = [{ id: 'task1', title: 'Task 1', version: 1, projectId: 'proj1', laneId: 'lane1', rank: 0, createdAt: '', updatedAt: '' }];
     global.fetch = boardMock([], { lanes: [{ id: 'lane1', name: 'Lane 1', version: 1, projectId: 'proj1', rank: 0, createdAt: '', updatedAt: '' }], tasks });
@@ -838,6 +918,169 @@ describe('App', () => {
     act(() => (window as any).__dndOnDragStart({ active: { id: 'task1', data: { current: { type: 'task' } } } }));
     expect(screen.getByLabelText('Drop task to create a new project')).toHaveAttribute('data-drop-type', 'new-project');
     expect(document.querySelector('#project-sidebar')).not.toHaveClass('open');
+  });
+
+  it('exposes desktop drop affordances only on other active projects', async () => {
+    const tasks = [{ id: 'task1', title: 'Task 1', version: 3, projectId: 'proj1', laneId: 'lane1', rank: 0, createdAt: '', updatedAt: '' }];
+    const projects = [
+      { id: 'proj1', name: 'Test Proj', version: 1, rank: 0, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+      { id: 'proj2', name: 'Next Proj', version: 1, rank: 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+      { id: 'proj3', name: 'Old Proj', version: 1, rank: 2, archivedAt: '2026-01-01', createdAt: '', updatedAt: '', ownerId: '1' },
+    ];
+    global.fetch = boardMock([], { tasks, projects });
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+    await screen.findByText('Task 1');
+
+    act(() => (window as any).__dndOnDragStart({ active: { id: 'task1', data: { current: { type: 'task' } } } }));
+    expect(document.querySelector('[data-project-drop-target="proj2"]')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Next Proj' }).parentElement).toHaveTextContent('Drop task');
+    expect(screen.getByRole('button', { name: 'Test Proj' }).parentElement).not.toHaveAttribute('data-project-drop-target');
+    expect(screen.getByRole('button', { name: 'Old Proj' }).parentElement).not.toHaveAttribute('data-project-drop-target');
+  });
+
+  it('mobile tray orders other active projects and New Project last without opening the sidebar', async () => {
+    setMobileViewport();
+    const tasks = [{ id: 'task1', title: 'Task 1', version: 3, projectId: 'proj1', laneId: 'lane1', rank: 0, createdAt: '', updatedAt: '' }];
+    const projects = [
+      { id: 'proj1', name: 'Test Proj', version: 1, rank: 0, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+      { id: 'proj3', name: 'Third', version: 1, rank: 3, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+      { id: 'proj2', name: 'Second', version: 1, rank: 2, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+    ];
+    global.fetch = boardMock([], { tasks, projects });
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+    await screen.findByText('Task 1');
+    act(() => (window as any).__dndOnDragStart({ active: { id: 'task1', data: { current: { type: 'task' } } } }));
+
+    const tray = screen.getByLabelText('Move task to');
+    expect(Array.from(tray.querySelectorAll('.mobile-project-destination')).map(item => item.textContent)).toEqual([
+      'SecondDrop task', 'ThirdDrop task', 'New Project',
+    ]);
+    expect(tray.querySelector('[data-project-drop-target="proj2"]')).toHaveAttribute('aria-label', 'Move task to Second');
+    expect(document.querySelector('#project-sidebar')).not.toHaveClass('open');
+  });
+
+  it('auto-scrolls the mobile destination list at drag edges only for tasks and within bounds', async () => {
+    setMobileViewport();
+    const tasks = [{ id: 'task1', title: 'Task 1', version: 3, projectId: 'proj1', laneId: 'lane1', rank: 0, createdAt: '', updatedAt: '' }];
+    const projects = [
+      { id: 'proj1', name: 'Test Proj', version: 1, rank: 0, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+      ...Array.from({ length: 8 }, (_, index) => ({ id: `proj${index + 2}`, name: `Project ${index + 2}`, version: 1, rank: index + 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' })),
+    ];
+    global.fetch = boardMock([], { tasks, projects });
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+    await screen.findByText('Task 1');
+    act(() => (window as any).__dndOnDragStart({ active: { id: 'task1', data: { current: { type: 'task' } } } }));
+
+    const list = document.querySelector('.mobile-destination-list') as HTMLDivElement;
+    Object.defineProperties(list, {
+      scrollTop: { value: 64, writable: true, configurable: true },
+      clientHeight: { value: 100, configurable: true },
+      scrollHeight: { value: 400, configurable: true },
+    });
+    list.getBoundingClientRect = vi.fn(() => ({ top: 100, bottom: 200, left: 0, right: 300, width: 300, height: 100, x: 0, y: 100, toJSON: () => ({}) }));
+    list.scrollBy = vi.fn();
+    const move = (type: string, top: number) => (window as any).__dndMonitor.onDragMove({
+      active: { data: { current: { type } }, rect: { current: { translated: { top, height: 20 } } } },
+    });
+
+    move('task', 175);
+    expect(list.scrollBy).toHaveBeenLastCalledWith({ top: 32, behavior: 'auto' });
+    move('task', 100);
+    expect(list.scrollBy).toHaveBeenLastCalledWith({ top: -32, behavior: 'auto' });
+    const calls = vi.mocked(list.scrollBy).mock.calls.length;
+    move('lane', 175);
+    move('task', 140);
+    expect(list.scrollBy).toHaveBeenCalledTimes(calls);
+    list.scrollTop = 0;
+    move('task', 100);
+    list.scrollTop = 300;
+    move('task', 175);
+    expect(list.scrollBy).toHaveBeenCalledTimes(calls);
+  });
+
+  it('moves to an existing project with only destinationProjectId and expectedVersion', async () => {
+    const tasks = [{ id: 'task1', title: 'Task 1', version: 8, projectId: 'proj1', laneId: 'lane1', rank: 0, createdAt: '', updatedAt: '' }];
+    const projects = [
+      { id: 'proj1', name: 'Test Proj', version: 1, rank: 0, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+      { id: 'proj2', name: 'Next Proj', version: 1, rank: 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+      { id: 'proj3', name: 'Old Proj', version: 1, rank: 2, archivedAt: '2026-01-01', createdAt: '', updatedAt: '', ownerId: '1' },
+    ];
+    const mockedFetch = boardMock([{ match: (url, options) => url.includes('/tasks/task1/move') && options?.method === 'POST', response: () => mockFetchResponse({}) }], { tasks, projects });
+    global.fetch = mockedFetch;
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+    await screen.findByText('Task 1');
+
+    await act(async () => (window as any).__dndOnDragEnd({
+      active: { id: 'task1', data: { current: { type: 'task' } } },
+      over: { id: 'desktop-project:proj2', data: { current: { type: 'project', projectId: 'proj2', name: 'Next Proj', rank: 1 } } },
+    }));
+    await waitFor(() => expect(screen.getAllByText('Task moved to Next Proj').length).toBeGreaterThan(0));
+    const moveCalls = vi.mocked(mockedFetch).mock.calls.filter((call: any) => call[0].includes('/tasks/task1/move'));
+    expect(JSON.parse(moveCalls[0][1].body)).toEqual({ destinationProjectId: 'proj2', expectedVersion: 8 });
+
+    act(() => (window as any).__dndOnDragEnd({
+      active: { id: 'task1', data: { current: { type: 'task' } } },
+      over: { id: 'synthetic', data: { current: { type: 'project', projectId: 'proj3', name: 'Old Proj', rank: 2 } } },
+    }));
+    expect(vi.mocked(mockedFetch).mock.calls.filter((call: any) => call[0].includes('/tasks/task1/move'))).toHaveLength(1);
+  });
+
+  it('refreshes source tasks after a stale cross-project move while preserving the target error', async () => {
+    const tasks = [{ id: 'task1', title: 'Task 1', version: 8, projectId: 'proj1', laneId: 'lane1', rank: 0, createdAt: '', updatedAt: '' }];
+    const projects = [
+      { id: 'proj1', name: 'Test Proj', version: 1, rank: 0, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+      { id: 'proj2', name: 'Next Proj', version: 1, rank: 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+    ];
+    const mockedFetch = boardMock([{
+      match: (url, options) => url.includes('/tasks/task1/move') && options?.method === 'POST',
+      response: () => mockFetchResponse({ errors: [{ code: 'STALE_VERSION', message: 'Version changed' }] }, false, 409),
+    }], { tasks, projects });
+    global.fetch = mockedFetch;
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+    await screen.findByText('Task 1');
+    const sourceLoadsBefore = vi.mocked(mockedFetch).mock.calls.filter((call: any) => call[0].includes('/projects/proj1/tasks') && !call[0].includes('/move')).length;
+
+    await act(async () => (window as any).__dndOnDragEnd({
+      active: { id: 'task1', data: { current: { type: 'task' } } },
+      over: { id: 'desktop-project:proj2', data: { current: { type: 'project', projectId: 'proj2', name: 'Next Proj', rank: 1 } } },
+    }));
+    await waitFor(() => expect(screen.getAllByText(/Could not move task to Next Proj: stale version - Version changed/).length).toBeGreaterThan(0));
+    await waitFor(() => expect(vi.mocked(mockedFetch).mock.calls.filter((call: any) => call[0].includes('/projects/proj1/tasks') && !call[0].includes('/move')).length).toBeGreaterThan(sourceLoadsBefore));
+  });
+
+  it('refreshes projects after a destination-related cross-project rejection', async () => {
+    const tasks = [{ id: 'task1', title: 'Task 1', version: 8, projectId: 'proj1', laneId: 'lane1', rank: 0, createdAt: '', updatedAt: '' }];
+    const projects = [
+      { id: 'proj1', name: 'Test Proj', version: 1, rank: 0, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+      { id: 'proj2', name: 'Gone Proj', version: 1, rank: 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' },
+    ];
+    const mockedFetch = boardMock([{
+      match: (url, options) => url.includes('/tasks/task1/move') && options?.method === 'POST',
+      response: () => mockFetchResponse({ errors: [{ code: 'NOT_FOUND', message: 'Destination no longer exists' }] }, false, 404),
+    }], { tasks, projects });
+    global.fetch = mockedFetch;
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+    await screen.findByText('Task 1');
+    const projectLoadsBefore = vi.mocked(mockedFetch).mock.calls.filter((call: any) => call[0].endsWith('/projects')).length;
+
+    await act(async () => (window as any).__dndOnDragEnd({
+      active: { id: 'task1', data: { current: { type: 'task' } } },
+      over: { id: 'desktop-project:proj2', data: { current: { type: 'project', projectId: 'proj2', name: 'Gone Proj', rank: 1 } } },
+    }));
+    await waitFor(() => expect(screen.getAllByText('Could not move task to Gone Proj: Destination no longer exists').length).toBeGreaterThan(0));
+    await waitFor(() => expect(vi.mocked(mockedFetch).mock.calls.filter((call: any) => call[0].endsWith('/projects')).length).toBeGreaterThan(projectLoadsBefore));
   });
 
   it('sidebar uses sibling buttons for active and archived selection and archive does not navigate', async () => {
@@ -893,6 +1136,8 @@ describe('App', () => {
     const over = { id: 'lane2', data: { current: { type: 'lane' } } };
     expect(accessibility.announcements.onDragStart({ active })).toContain('Write docs');
     expect(accessibility.announcements.onDragOver({ active, over })).toContain('Lane 2');
+    expect(accessibility.announcements.onDragOver({ active, over: { id: 'desktop-project:proj2', data: { current: { type: 'project', projectId: 'proj2', name: 'Documentation' } } } })).toContain('Documentation');
+    expect(accessibility.screenReaderInstructions.draggable).toContain('existing project');
     expect(accessibility.announcements.onDragCancel({ active, over: null })).toContain('Cancelled');
   });
 
@@ -940,6 +1185,35 @@ describe('App', () => {
     expect(run('ArrowLeft')).toEqual({ x: 630, y: 80 }); // New Project from first lane
     expect(run('ArrowRight', 'new-project-drop-target', 'new-project')).toEqual({ x: 330, y: 50 }); // original task
     expect(run('ArrowUp')).toEqual({ x: 5, y: 6 });
+  });
+
+  it('keyboard task coordinates order deduplicated project destinations before New Project', () => {
+    const lanes = [{ id: 'lane1', name: 'One', rank: 0 }] as any;
+    const tasks = [{ id: 'a', title: 'A', laneId: 'lane1', rank: 0 }] as any;
+    const getter = createKeyboardCoordinateGetter({ lanes, tasks });
+    const ids = ['lane1', 'a', 'desktop-project:p2', 'mobile-project:p2', 'mobile-project:p3', 'mobile-new-project-drop-target'];
+    const rects = new Map(ids.map((id, index) => [id, { left: index * 100, top: 0, width: 80, height: 60 }]));
+    const containers = new Map<string, any>([
+      ['lane1', { disabled: false }], ['a', { disabled: false }],
+      ['desktop-project:p2', { disabled: true, data: { current: { type: 'project', projectId: 'p2', rank: 2 } } }],
+      ['mobile-project:p2', { disabled: false, data: { current: { type: 'project', projectId: 'p2', rank: 2 } } }],
+      ['mobile-project:p3', { disabled: false, data: { current: { type: 'project', projectId: 'p3', rank: 3 } } }],
+      ['mobile-new-project-drop-target', { disabled: false, data: { current: { type: 'new-project' } } }],
+    ]);
+    const run = (code: string, over: string | null = null, overType = 'task') => getter({ code, preventDefault: vi.fn() } as any, {
+      active: 'a', currentCoordinates: { x: 5, y: 6 }, context: {
+        active: { data: { current: { type: 'task' } } },
+        over: over ? { id: over, data: { current: { type: overType } } } : null,
+        droppableRects: rects, droppableContainers: containers, collisionRect: { width: 20, height: 20 },
+      } as any,
+    });
+    expect(run('ArrowLeft')).toEqual({ x: 330, y: 20 });
+    expect(run('ArrowDown', 'mobile-project:p2', 'project')).toEqual({ x: 430, y: 20 });
+    expect(run('ArrowDown', 'mobile-project:p3', 'project')).toEqual({ x: 530, y: 20 });
+    expect(run('ArrowDown', 'mobile-new-project-drop-target', 'new-project')).toEqual({ x: 5, y: 6 });
+    expect(run('ArrowUp', 'mobile-project:p2', 'project')).toEqual({ x: 5, y: 6 });
+    expect(run('ArrowRight', 'mobile-project:p3', 'project')).toEqual({ x: 130, y: 20 });
+    expect(run('ArrowLeft', 'mobile-project:p3', 'project')).toEqual({ x: 5, y: 6 });
   });
 
   it('flyout focuses close button on mount (loading state) and restores trigger focus on close', async () => {

@@ -9,6 +9,7 @@ import {
   PointerSensor,
   KeyboardSensor,
   useDroppable,
+  useDndMonitor,
   type DragStartEvent,
   type DragEndEvent,
   type DragOverEvent,
@@ -99,11 +100,38 @@ export function createKeyboardCoordinateGetter({ lanes, tasks }: KeyboardBoardMo
     } else if (activeType === 'task') {
       const original = tasks.find(task => task.id === active);
       if (!original) return;
-      const onNewProject = currentId === NEW_PROJECT_DROP_ID || currentId === MOBILE_NEW_PROJECT_DROP_ID;
-      if (onNewProject) {
-        if (event.code !== 'ArrowRight') return currentCoordinates;
-        const originalLaneTasks = sortedTasks(original.laneId);
-        targetId = originalLaneTasks.find(task => task.id === original.id)?.id ?? original.laneId;
+      const destinations: Array<{ id: UniqueIdentifier; type: string; projectId?: string; rank: number }> = [];
+      const seenProjects = new Set<string>();
+      context.droppableContainers.forEach((container: any, id: UniqueIdentifier) => {
+        const rect = context.droppableRects.get(id);
+        if (container.disabled || !rect || rect.width <= 0 || rect.height <= 0) return;
+        const data = container.data?.current;
+        const fallbackNewProject = id === NEW_PROJECT_DROP_ID || id === MOBILE_NEW_PROJECT_DROP_ID;
+        const type = data?.type ?? (fallbackNewProject ? 'new-project' : undefined);
+        if (type !== 'project' && type !== 'new-project') return;
+        if (type === 'project') {
+          const logicalId = String(data?.projectId ?? '');
+          if (!logicalId || seenProjects.has(logicalId)) return;
+          seenProjects.add(logicalId);
+          destinations.push({ id, type, projectId: logicalId, rank: Number(data?.rank ?? 0) });
+        } else if (!destinations.some(item => item.type === 'new-project')) {
+          destinations.push({ id, type, rank: Number.POSITIVE_INFINITY });
+        }
+      });
+      destinations.sort((a, b) => a.rank - b.rank || String(a.projectId ?? '').localeCompare(String(b.projectId ?? '')));
+      const currentDestinationIndex = destinations.findIndex(item => item.id === currentId);
+      const onDestination = currentDestinationIndex >= 0 || context.over?.data.current?.type === 'project' || context.over?.data.current?.type === 'new-project';
+      if (onDestination) {
+        if (event.code === 'ArrowUp' || event.code === 'ArrowDown') {
+          const index = currentDestinationIndex >= 0 ? currentDestinationIndex : 0;
+          const delta = event.code === 'ArrowUp' ? -1 : 1;
+          targetId = destinations[index + delta]?.id;
+        } else if (event.code === 'ArrowRight') {
+          const originalLaneTasks = sortedTasks(original.laneId);
+          targetId = originalLaneTasks.find(task => task.id === original.id)?.id ?? original.laneId;
+        } else {
+          return currentCoordinates;
+        }
       } else {
         const currentTask = tasks.find(task => task.id === currentId) ?? original;
         const laneId = context.over?.data.current?.type === 'lane' ? String(currentId) : currentTask.laneId;
@@ -118,11 +146,7 @@ export function createKeyboardCoordinateGetter({ lanes, tasks }: KeyboardBoardMo
           const delta = event.code === 'ArrowLeft' ? -1 : 1;
           const destinationLane = sortedLanes[laneIndex + delta];
           if (!destinationLane && event.code === 'ArrowLeft' && laneIndex === 0) {
-            targetId = [NEW_PROJECT_DROP_ID, MOBILE_NEW_PROJECT_DROP_ID].find(id => {
-              const container = context.droppableContainers.get(id);
-              const rect = context.droppableRects.get(id);
-              return container && !container.disabled && rect && rect.width > 0 && rect.height > 0;
-            });
+            targetId = destinations[0]?.id;
           } else if (destinationLane) {
             const destinationTasks = sortedTasks(destinationLane.id);
             const ordinal = Math.max(0, taskIndex);
@@ -217,6 +241,45 @@ function Header({ user, onLogout, onOpenSettings, onToggleSidebar, showProjectMe
 }
 
 // ===== Project Sidebar =====
+function DesktopProjectDroppableRow({ project, selected, taskDragActive, isMobile, onSelect, onArchive }: {
+  project: Project;
+  selected: boolean;
+  taskDragActive: boolean;
+  isMobile: boolean;
+  onSelect: () => void;
+  onArchive: () => void;
+}) {
+  const eligible = taskDragActive && !isMobile && !selected;
+  const drop = useDroppable({
+    id: `desktop-project:${project.id}`,
+    data: { type: 'project', projectId: project.id, name: project.name, rank: project.rank },
+    disabled: !eligible,
+  });
+  return (
+    <li>
+      <div
+        ref={drop.setNodeRef}
+        className={`sidebar-item ${selected ? 'active current-project' : ''} ${eligible ? 'project-drop-eligible' : ''} ${drop.isOver ? 'project-drop-over' : ''}`}
+        data-project-drop-target={eligible ? project.id : undefined}
+      >
+        <button type="button" className="sidebar-item-select" onClick={onSelect} aria-current={selected ? 'page' : undefined}>
+          <span className="sidebar-item-name">{project.name}</span>
+          {eligible && <span className="project-drop-badge" aria-hidden="true">Drop task</span>}
+        </button>
+        <button
+          type="button"
+          className="btn-icon btn-small sidebar-item-action"
+          onClick={event => { event.stopPropagation(); onArchive(); }}
+          aria-label={`Archive ${project.name}`}
+          title={`Archive ${project.name}`}
+        >
+          <Archive size={14} />
+        </button>
+      </div>
+    </li>
+  );
+}
+
 function ProjectSidebar({
   projects,
   archivedProjects,
@@ -332,24 +395,15 @@ function ProjectSidebar({
         <div className="sidebar-heading">Active Projects</div>
         {projects.length === 0 && <div className="sidebar-empty">No projects</div>}
         <ul className="sidebar-list">
-          {projects.map((p: Project) => (
-            <li key={p.id}>
-              <div className={`sidebar-item ${selectedProjectId === p.id ? 'active' : ''}`}>
-                <button type="button" className="sidebar-item-select" onClick={() => onSelect(p.id)} aria-current={selectedProjectId === p.id ? 'page' : undefined}>
-                  <span className="sidebar-item-name">{p.name}</span>
-                </button>
-                <button
-                  type="button"
-                  className="btn-icon btn-small sidebar-item-action"
-                  onClick={e => { e.stopPropagation(); onArchive(p.id); }}
-                  aria-label={`Archive ${p.name}`}
-                  title={`Archive ${p.name}`}
-                >
-                  <Archive size={14} />
-                </button>
-              </div>
-            </li>
-          ))}
+          {projects.map((p: Project) => <DesktopProjectDroppableRow
+            key={p.id}
+            project={p}
+            selected={selectedProjectId === p.id}
+            taskDragActive={taskDragActive}
+            isMobile={isMobile}
+            onSelect={() => onSelect(p.id)}
+            onArchive={() => onArchive(p.id)}
+          />)}
         </ul>
       </div>
 
@@ -391,23 +445,65 @@ function ProjectSidebar({
 }
 
 // ===== Board =====
-function MobileNewProjectDropShelf({ active }: { active: boolean }) {
+function MobileProjectDestination({ project, active, isMobile }: { project: Project; active: boolean; isMobile: boolean }) {
+  const drop = useDroppable({
+    id: `mobile-project:${project.id}`,
+    data: { type: 'project', projectId: project.id, name: project.name, rank: project.rank },
+    disabled: !active || !isMobile,
+  });
+  return (
+    <div ref={drop.setNodeRef} className={`mobile-project-destination ${drop.isOver ? 'hovered' : ''}`} data-project-drop-target={project.id} aria-label={`Move task to ${project.name}`}>
+      <span>{project.name}</span>
+      <span className="project-drop-badge" aria-hidden="true">Drop task</span>
+    </div>
+  );
+}
+
+function MobileDestinationTray({ active, projects }: { active: boolean; projects: Project[] }) {
   const isMobile = useMobileMediaQuery();
+  const listRef = useRef<HTMLDivElement>(null);
   const drop = useDroppable({
     id: MOBILE_NEW_PROJECT_DROP_ID,
     data: { type: 'new-project' },
     disabled: !active || !isMobile,
   });
+  useDndMonitor({
+    onDragMove(event) {
+      if (!active || !isMobile || event.active.data.current?.type !== 'task') return;
+      const list = listRef.current;
+      const activeRect = event.active.rect.current.translated;
+      if (!list || !activeRect) return;
+      const listRect = list.getBoundingClientRect();
+      const centerY = activeRect.top + activeRect.height / 2;
+      const edgeSize = 48;
+      const step = 32;
+      if (centerY >= listRect.top && centerY <= listRect.top + edgeSize && list.scrollTop > 0) {
+        list.scrollBy({ top: -step, behavior: 'auto' });
+      } else if (
+        centerY <= listRect.bottom &&
+        centerY >= listRect.bottom - edgeSize &&
+        list.scrollTop + list.clientHeight < list.scrollHeight
+      ) {
+        list.scrollBy({ top: step, behavior: 'auto' });
+      }
+    },
+  });
   if (!active) return null;
   return (
-    <div
-      ref={drop.setNodeRef}
-      className={`mobile-new-project-shelf ${drop.isOver ? 'hovered' : ''}`}
-      data-drop-type="new-project"
-      aria-label="Drop task to create a new project"
-    >
-      <FolderPlus size={18} aria-hidden="true" />
-      <span>New Project</span>
+    <div className="mobile-destination-tray" aria-label="Move task to">
+      <div className="mobile-destination-heading">Move task to</div>
+      <div ref={listRef} className="mobile-destination-list">
+        {projects.map(project => <MobileProjectDestination key={project.id} project={project} active={active} isMobile={isMobile} />)}
+        <div
+          ref={drop.setNodeRef}
+          className={`mobile-project-destination mobile-new-project-shelf ${drop.isOver ? 'hovered' : ''}`}
+          data-drop-type="new-project"
+          aria-label="Drop task to create a new project"
+        >
+          <FolderPlus size={18} aria-hidden="true" />
+          <span>New Project</span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -500,7 +596,7 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
   const [laneReorderEdge, setLaneReorderEdge] = useState<LaneDropEdge>('none');
 
   // Active projects
-  const activeProjects = projectsQuery.data?.filter((p: Project) => !p.archivedAt) || [];
+  const activeProjects = projectsQuery.data?.filter((p: Project) => !p.archivedAt).sort((a: Project, b: Project) => a.rank - b.rank) || [];
   const archivedProjects = projectsQuery.data?.filter((p: Project) => !!p.archivedAt) || [];
 
   const tasksByLane = useCallback(
@@ -540,6 +636,32 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
         triggerToast('Stale version - refresh to see changes', 'danger');
       } else {
         triggerToast(e.errors?.[0]?.message || 'Move failed', 'danger');
+      }
+    }
+  };
+
+  const handleExistingProjectMove = async (taskId: string, destinationProjectId: string, targetName: string) => {
+    const task = tasksQuery.data?.find((item: Task) => item.id === taskId);
+    const target = activeProjects.find((item: Project) => item.id === destinationProjectId);
+    if (!task || !target || target.archivedAt || target.id === task.projectId) return;
+    const name = target.name || targetName;
+    try {
+      await api.tasks.move(taskId, { destinationProjectId: target.id, expectedVersion: task.version });
+      queryClient.invalidateQueries({ queryKey: ['tasks', task.projectId] });
+      queryClient.invalidateQueries({ queryKey: ['tasks', target.id] });
+      triggerToast(`Task moved to ${name}`, 'success');
+    } catch (error: any) {
+      const code = error.errors?.[0]?.code;
+      const detail = error.errors?.[0]?.message;
+      queryClient.invalidateQueries({ queryKey: ['tasks', task.projectId] });
+      queryClient.invalidateQueries({ queryKey: ['tasks', target.id] });
+      if (code === 'BAD_REQUEST' || code === 'NOT_FOUND') {
+        queryClient.invalidateQueries({ queryKey: ['projects'] });
+      }
+      if (code === 'STALE_VERSION') {
+        triggerToast(`Could not move task to ${name}: stale version${detail ? ` - ${detail}` : ''}`, 'danger');
+      } else {
+        triggerToast(`Could not move task to ${name}${detail ? `: ${detail}` : ''}`, 'danger');
       }
     }
   };
@@ -587,8 +709,8 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
       } else if (overType === 'lane' && overId) {
         setOverTaskId(null);
         setWholeLaneTargetId(overId);
-      } else if (overType === 'new-project') {
-        // New-project target — clear board indicators.
+      } else if (overType === 'new-project' || overType === 'project') {
+        // Project destinations clear board insertion indicators.
         setOverTaskId(null);
         setWholeLaneTargetId(null);
       } else {
@@ -645,7 +767,7 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
 
     try {
       if (activeType === 'task') {
-        handleTaskDragEnd(activeId, overId, overType);
+        handleTaskDragEnd(activeId, overId, event.over?.data.current);
       } else if (activeType === 'lane') {
         handleLaneDragEnd(activeId, overId, overType);
       }
@@ -654,13 +776,21 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
     }
   };
 
-  const handleTaskDragEnd = (taskId: string, overId: string | undefined, overType: string | undefined) => {
+  const handleTaskDragEnd = (taskId: string, overId: string | undefined, overData: Record<string, any> | undefined) => {
+    const overType = overData?.type as string | undefined;
     if (!overId || !overType) return;
 
     // New project drop target — open the move-to-new-project dialog only.
     if (overType === 'new-project') {
       const task = tasksQuery.data?.find((t: Task) => t.id === taskId);
       if (task) setShowMoveToNewProject(task);
+      return;
+    }
+
+    if (overType === 'project') {
+      const destinationProjectId = typeof overData?.projectId === 'string' ? overData.projectId : '';
+      const name = typeof overData?.name === 'string' ? overData.name : 'project';
+      void handleExistingProjectMove(taskId, destinationProjectId, name);
       return;
     }
 
@@ -796,6 +926,7 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
   const describeDestination = (over: { id: UniqueIdentifier; data: { current?: Record<string, any> } } | null) => {
     if (!over) return 'no destination';
     if (over.data.current?.type === 'new-project') return 'New Project';
+    if (over.data.current?.type === 'project') return over.data.current.name ?? 'project';
     const task = tasks.find(item => item.id === over.id);
     if (task) {
       const lane = lanes.find(item => item.id === task.laneId);
@@ -825,7 +956,7 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
       onDragCancel={onDragCancel}
       onDragEnd={onDragEnd}
       accessibility={{
-        screenReaderInstructions: { draggable: 'Press Space or Enter to pick up. Use arrow keys to choose a task, lane, or New Project. Press Space or Enter to drop, or Escape to cancel.' },
+        screenReaderInstructions: { draggable: 'Press Space or Enter to pick up. Use arrow keys to choose a task, lane, existing project, or New Project. Press Space or Enter to drop, or Escape to cancel.' },
         announcements,
       }}
     >
@@ -857,7 +988,7 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
           onClose={onCloseSidebar}
           taskDragActive={taskDragActive}
         />
-        <MobileNewProjectDropShelf active={taskDragActive} />
+        <MobileDestinationTray active={taskDragActive} projects={activeProjects.filter((item: Project) => item.id !== projectId)} />
         <div className="board">
           {isArchived ? (
             <div className="board-header board-header-archived">

@@ -272,6 +272,7 @@ textarea {
 .sidebar,
 .lanes-container,
 .lane-tasks,
+.mobile-destination-list,
 .dialog,
 .flyout-body,
 .toast-container,
@@ -283,6 +284,7 @@ textarea {
 .sidebar::-webkit-scrollbar,
 .lanes-container::-webkit-scrollbar,
 .lane-tasks::-webkit-scrollbar,
+.mobile-destination-list::-webkit-scrollbar,
 .dialog::-webkit-scrollbar,
 .flyout-body::-webkit-scrollbar,
 .ai-cards-items::-webkit-scrollbar {
@@ -293,6 +295,7 @@ textarea {
 .sidebar::-webkit-scrollbar-track,
 .lanes-container::-webkit-scrollbar-track,
 .lane-tasks::-webkit-scrollbar-track,
+.mobile-destination-list::-webkit-scrollbar-track,
 .dialog::-webkit-scrollbar-track,
 .flyout-body::-webkit-scrollbar-track,
 .ai-cards-items::-webkit-scrollbar-track {
@@ -302,6 +305,7 @@ textarea {
 .sidebar::-webkit-scrollbar-thumb,
 .lanes-container::-webkit-scrollbar-thumb,
 .lane-tasks::-webkit-scrollbar-thumb,
+.mobile-destination-list::-webkit-scrollbar-thumb,
 .dialog::-webkit-scrollbar-thumb,
 .flyout-body::-webkit-scrollbar-thumb,
 .ai-cards-items::-webkit-scrollbar-thumb {
@@ -314,6 +318,7 @@ textarea {
 .sidebar::-webkit-scrollbar-thumb:hover,
 .lanes-container::-webkit-scrollbar-thumb:hover,
 .lane-tasks::-webkit-scrollbar-thumb:hover,
+.mobile-destination-list::-webkit-scrollbar-thumb:hover,
 .dialog::-webkit-scrollbar-thumb:hover,
 .flyout-body::-webkit-scrollbar-thumb:hover,
 .ai-cards-items::-webkit-scrollbar-thumb:hover {
@@ -422,7 +427,7 @@ textarea {
 
 .sidebar-mobile-header,
 .sidebar-backdrop,
-.mobile-new-project-shelf {
+.mobile-destination-tray {
   display: none;
 }
 
@@ -499,6 +504,33 @@ textarea {
   background: var(--grad-accent-soft);
   border-color: var(--accent-blue);
   color: var(--text-primary);
+}
+
+.sidebar-item.project-drop-eligible {
+  border-style: dashed;
+  border-color: var(--accent-blue);
+  background: var(--grad-accent-soft);
+}
+
+.sidebar-item.project-drop-over {
+  border-style: solid;
+  border-color: var(--accent-blue-strong);
+  box-shadow: 0 0 0 3px rgba(76, 141, 219, 0.28), var(--shadow-md);
+  transform: translateX(2px);
+}
+
+.project-drop-badge {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--accent-blue);
+  border-radius: 999px;
+  color: var(--accent-blue-strong);
+  background: var(--bg-inset);
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.4;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .sidebar-item-name {
@@ -873,7 +905,7 @@ textarea {
   border: 1px solid var(--border-subtle);
   padding: 10px 12px;
   position: relative;
-  cursor: grab;
+  cursor: default;
   transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.06s ease;
   box-shadow: var(--shadow-sm);
 }
@@ -881,10 +913,6 @@ textarea {
 .task-card:hover {
   border-color: var(--border-strong);
   box-shadow: var(--shadow-md);
-}
-
-.task-card:active {
-  cursor: grabbing;
 }
 
 .task-card:focus-visible {
@@ -921,6 +949,21 @@ textarea {
   gap: 4px;
 }
 
+.task-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -4px -6px 7px;
+  min-height: 36px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.task-card-header:active,
+.task-card.dragging .task-card-header {
+  cursor: grabbing;
+}
+
 .task-title {
   font-size: 0.92rem;
   font-weight: 600;
@@ -935,26 +978,11 @@ textarea {
   word-break: break-word;
 }
 
-.task-actions {
-  display: flex;
-  gap: 4px;
-  margin-top: 8px;
-  justify-content: flex-end;
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity 0.14s ease;
-}
-
-.task-card:hover .task-actions,
-.task-card:focus-within .task-actions {
-  opacity: 1;
-  visibility: visible;
-}
-
 .task-action-btn {
-  width: 36px;
-  height: 36px;
-  min-height: 36px;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
   color: var(--text-secondary);
   background: var(--bg-surface-2);
   border: 1px solid var(--border-subtle);
@@ -972,13 +1000,36 @@ textarea {
   border-color: var(--danger);
 }
 
-.task-drag-handle {
+.task-drag-rail {
+  flex: 1;
+  min-width: 44px;
+  min-height: 36px;
+  padding: 0 8px;
   cursor: grab;
   touch-action: none;
 }
 
-.task-drag-handle:active {
+.task-drag-rail:hover .task-drag-track {
+  background: var(--accent-blue-strong);
+  box-shadow: 0 0 0 1px rgba(76, 141, 219, 0.25);
+}
+
+.task-drag-rail:focus-visible {
+  outline: 2px solid var(--accent-blue-strong);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 4px rgba(76, 141, 219, 0.24);
+}
+
+.task-drag-rail:active {
   cursor: grabbing;
+}
+
+.task-drag-track {
+  width: 100%;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
 }
 
 /* Crisp horizontal insertion line before hovered task */
@@ -1508,7 +1559,6 @@ textarea {
 
   /* Viewport width, rather than pointer heuristics, guarantees that controls
      remain visible and comfortably tappable on hybrid mobile hardware. */
-  .task-actions,
   .sidebar-item-action {
     opacity: 1;
     visibility: visible;
@@ -1516,6 +1566,7 @@ textarea {
   }
 
   .task-action-btn,
+  .task-drag-rail,
   .lane-grip,
   .lane-actions .btn-icon,
   .header .btn-icon,
@@ -1557,29 +1608,70 @@ textarea {
     z-index: 40;
   }
 
-  .mobile-new-project-shelf {
+  .mobile-destination-tray {
     display: flex;
+    flex-direction: column;
     position: fixed;
-    right: 14px;
-    bottom: 14px;
+    right: 12px;
+    bottom: 12px;
     z-index: 45;
-    align-items: center;
-    gap: 8px;
-    min-width: 148px;
-    min-height: 52px;
-    padding: 10px 16px;
-    color: #fff;
-    font-weight: 650;
-    background: var(--grad-accent);
-    border: 2px dashed rgba(255, 255, 255, 0.72);
+    width: min(320px, calc(100vw - 24px));
+    max-height: min(34dvh, 280px);
+    padding: 10px;
+    color: var(--text-primary);
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent-blue);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-lg);
     pointer-events: none;
   }
 
-  .mobile-new-project-shelf.hovered {
-    transform: translateY(-2px);
-    box-shadow: 0 0 0 4px rgba(76, 141, 219, 0.3), var(--shadow-lg);
+  .mobile-destination-heading {
+    padding: 0 4px 8px;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .mobile-destination-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 2px;
+  }
+
+  .mobile-project-destination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-shrink: 0;
+    min-height: 44px;
+    padding: 8px 12px;
+    border: 1px dashed var(--accent-blue);
+    border-radius: var(--radius-md);
+    background: var(--grad-accent-soft);
+    font-size: 0.86rem;
+    font-weight: 600;
+  }
+
+  .mobile-project-destination.hovered {
+    border-style: solid;
+    border-color: var(--accent-blue-strong);
+    background: var(--bg-surface-2);
+    box-shadow: 0 0 0 3px rgba(76, 141, 219, 0.3);
+  }
+
+  .mobile-new-project-shelf {
+    color: #fff;
+    background: var(--grad-accent);
+    border-color: rgba(255, 255, 255, 0.72);
+    justify-content: flex-start;
   }
 
   .mobile-toggle {
@@ -1613,13 +1705,13 @@ textarea {
 }
 
 @media (hover: none), (pointer: coarse) {
-  .task-actions,
   .sidebar-item-action {
     opacity: 1;
     visibility: visible;
   }
 
   .task-action-btn,
+  .task-drag-rail,
   .lane-grip,
   .lane-actions .btn-icon,
   .sidebar-item-action {

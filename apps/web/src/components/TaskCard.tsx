@@ -1,4 +1,4 @@
-import { Edit, Trash, GripVertical } from 'lucide-react';
+import { Edit, Trash } from 'lucide-react';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import type { Task } from '../types';
 
@@ -47,39 +47,48 @@ export default function TaskCard({
   return (
     <article ref={setArticleRef} className={className} aria-label={`Task ${task.title}`}>
       {insertIndicator === 'before' && <span className="task-insert-line" aria-hidden="true" />}
-      <div className="task-body">
-        <div className="task-title">{task.title}</div>
-        {task.description && <div className="task-description">{task.description}</div>}
-      </div>
-      <div className="task-actions">
-        <button
-          type="button"
-          className="task-action-btn task-drag-handle"
-          {...draggable.attributes}
-          {...draggable.listeners}
-          aria-label={`Drag task ${task.title}`}
-          title={`Drag task ${task.title}`}
-        >
-          <GripVertical size={14} />
-        </button>
+      <div
+        className="task-card-header"
+        onPointerDown={event => {
+          if ((event.target as Element).closest('button')) return;
+          draggable.listeners?.onPointerDown?.(event);
+        }}
+      >
         <button
           type="button"
           className="task-action-btn"
-          onClick={e => { e.stopPropagation(); onEdit(); }}
+          onPointerDown={event => event.stopPropagation()}
+          onClick={event => { event.stopPropagation(); onEdit(); }}
           aria-label={`Edit task ${task.title}`}
           title={`Edit task ${task.title}`}
         >
           <Edit size={14} />
         </button>
         <button
+          ref={draggable.setActivatorNodeRef}
+          type="button"
+          className="task-drag-rail"
+          {...draggable.attributes}
+          {...draggable.listeners}
+          aria-label={`Drag task ${task.title}`}
+          title={`Drag task ${task.title}`}
+        >
+          <span className="task-drag-track" aria-hidden="true" />
+        </button>
+        <button
           type="button"
           className="task-action-btn danger"
-          onClick={e => { e.stopPropagation(); onDelete(); }}
+          onPointerDown={event => event.stopPropagation()}
+          onClick={event => { event.stopPropagation(); onDelete(); }}
           aria-label={`Delete task ${task.title}`}
           title={`Delete task ${task.title}`}
         >
           <Trash size={14} />
         </button>
+      </div>
+      <div className="task-body">
+        <div className="task-title">{task.title}</div>
+        {task.description && <div className="task-description">{task.description}</div>}
       </div>
     </article>
   );
