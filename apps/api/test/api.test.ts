@@ -4,6 +4,7 @@ import { Repository, createDb } from '@taskmaster/db';
 import { sql } from 'kysely';
 import * as shared from '@taskmaster/shared';
 import { randomUUID, randomBytes } from 'crypto';
+import { buildCanonicalCallbackUrl } from '../src/routes/auth.js';
 
 let app: any;
 let repo: Repository;
@@ -985,6 +986,88 @@ describe('API behavior tests', () => {
       expect(consumed2).toBeNull();
 
       await db2.destroy();
+    });
+  });
+
+  // --- buildCanonicalCallbackUrl helper tests ---
+
+  describe('buildCanonicalCallbackUrl', () => {
+    const configuredUri = 'https://taskmaster.fzbl.xyz/api/v1/auth/callback';
+
+    it('relative callback with code/state yields exactly the configured URI with those params', () => {
+      const url = buildCanonicalCallbackUrl(
+        '/api/v1/auth/callback?code=abc123&state=def456',
+        configuredUri,
+      );
+      expect(url.origin).toBe('https://taskmaster.fzbl.xyz');
+      expect(url.pathname).toBe('/api/v1/auth/callback');
+      expect(url.searchParams.get('code')).toBe('abc123');
+      expect(url.searchParams.get('state')).toBe('def456');
+    });
+
+    it('configured nondefault path/trailing behavior is preserved', () => {
+      const nondefaultUri = 'https://taskmaster.fzbl.xyz/api/v1/auth/callback/extra';
+      const url = buildCanonicalCallbackUrl(
+        '/api/v1/auth/callback/extra?code=abc&state=def',
+        nondefaultUri,
+      );
+      expect(url.pathname).toBe('/api/v1/auth/callback/extra');
+      expect(url.searchParams.get('code')).toBe('abc');
+      expect(url.searchParams.get('state')).toBe('def');
+    });
+
+    it('attacker host/scheme in absolute requestUrl cannot replace configured origin/path', () => {
+      const evilUrl = 'https://evil-host.com/evil-path?code=abc&state=def';
+      const url = buildCanonicalCallbackUrl(evilUrl, configuredUri);
+      // The configured origin must be preserved
+      expect(url.origin).toBe('https://taskmaster.fzbl.xyz');
+      expect(url.pathname).toBe('/api/v1/auth/callback');
+      expect(url.searchParams.get('code')).toBe('abc');
+      expect(url.searchParams.get('state')).toBe('def');
+    });
+
+    it('no query yields configured callback URI without query', () => {
+      const url = buildCanonicalCallbackUrl('/api/v1/auth/callback', configuredUri);
+      expect(url.origin).toBe('https://taskmaster.fzbl.xyz');
+      expect(url.pathname).toBe('/api/v1/auth/callback');
+      expect(url.search).toBe('');
+    });
+  });
+
+  // --- Route/service-level test for token exchange failure ---
+
+  describe('OIDC token exchange failure', () => {
+    it('token failure maps to sanitized 502 and clears cookie', async () => {
+      // We need to simulate a callback request that passes all validation steps
+      // (cookie signature, state match, transaction existence) but then fails
+// at the discovery/token exchange step because OIDC_ISSUER is non-existent.
+
+// First, create a valid OIDC transaction record with matching state
+      const state = randomBytes(32).toString('hex');
+      const nonce = randomBytes(32).toString('hex');
+      const codeVerifier = randomBytes(32).toString('hex');
+      const transactionId = randomBytes(32).toString('hex');
+      await repo.createOidcTransaction({ transactionId, state, nonce, codeVerifier });
+
+      // Compute the signed cookie value using the app's SESSION_SECRET
+      // The signing format is: value + '.' + base64hmac(secret, value)
+      const { sign } = await import('@fastify/cookie/signer');
+      const env = JSON.parse(JSON.stringify(process.env)); // copy env vars
+      const signedCookieValue = sign(transactionId, env.SESSION_SECRET);
+
+      // Send callback request with matching code/state and signed cookie
+      const reply = await app.inject({
+        url: `/api/v1/auth/callback?code=fake&state=${state}`,
+        headers: {
+          cookie: 'oidc_txn=' + signedCookieValue,
+        },
+      });
+
+      // The discovery to http://localhost:9999 will fail, so we should get 502
+      expect(reply.statusCode).toBe(502);
+      const body = JSON.parse(reply.body);
+      expect(body.errors[0].code).toBe('OIDC_TOKEN_EXCHANGE_FAILED');
+      expect(body.errors[0].message).toBe('Unable to complete sign-in');
     });
   });
 });

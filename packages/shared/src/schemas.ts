@@ -21,6 +21,7 @@ export const ApiErrorCode = z.enum([
   'BAD_REQUEST',
   'CONFLICT',
   'INTERNAL_ERROR',
+  'OIDC_TOKEN_EXCHANGE_FAILED',
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCode>;
 

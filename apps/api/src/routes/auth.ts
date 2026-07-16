@@ -11,15 +11,27 @@ import {
   authorizationCodeGrant,
   ClientSecretPost,
 } from 'openid-client';
-import { URL as URLNode } from 'url';
 import { randomBytes } from 'crypto';
+import { URL as URLNode } from 'url';
+
+export function buildCanonicalCallbackUrl(
+  requestUrl: string,
+  configuredRedirectUri: string,
+): URL {
+  // Parse the configured redirect URI to get its scheme, host, and path
+  const configuredUrl = new URLNode(configuredRedirectUri);
+  // Create a new URL using the configured scheme/host/path
+  const canonicalUrl = new URLNode(configuredUrl.origin + configuredUrl.pathname);
+  // Parse the request URL only to extract query parameters (code/state)
+  const requestParsed = new URLNode(requestUrl, 'http://localhost');
+  // Append the query string from the request (code, state, etc.)
+  canonicalUrl.search = requestParsed.search;
+  return canonicalUrl;
+}
 
 export async function registerAuthRoutes(app: FastifyInstance) {
   const env = parseEnv();
   const services = app.services as Services;
-
-  // The secret for signing OIDC transient cookies
-  const secret = env.SESSION_SECRET || randomBytes(32).toString('hex');
 
   // GET /auth/login - initiate OIDC login
   app.get('/auth/login', async (request, reply) => {
@@ -112,23 +124,49 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     }
 
     // Discover and exchange code (only if transaction is valid and consumed)
-    const issuerUrl = new URLNode(env.OIDC_ISSUER);
-    const config = await discovery(
-      issuerUrl,
-      env.OIDC_CLIENT_ID,
-      undefined,
-      ClientSecretPost(env.OIDC_CLIENT_SECRET),
-    );
+    let tokenSet;
+    try {
+      const issuerUrl = new URLNode(env.OIDC_ISSUER);
+      const config = await discovery(
+        issuerUrl,
+        env.OIDC_CLIENT_ID,
+        undefined,
+        ClientSecretPost(env.OIDC_CLIENT_SECRET),
+      );
 
-    const currentUrl = new URLNode(request.url, 'http://localhost');
-    const tokenSet = await authorizationCodeGrant(
-      config,
-      currentUrl,
-      { expectedState: stored.state, pkceCodeVerifier: stored.codeVerifier, expectedNonce: stored.nonce },
-    );
+      // Build the canonical callback URL from the configured redirect URI
+      const canonicalUrl = buildCanonicalCallbackUrl(
+        request.url,
+        env.OIDC_REDIRECT_URI,
+      );
+
+      tokenSet = await authorizationCodeGrant(
+        config,
+        canonicalUrl,
+        { expectedState: stored.state, pkceCodeVerifier: stored.codeVerifier, expectedNonce: stored.nonce },
+      );
+    } catch (error: any) {
+      // Clear OIDC transaction cookie on failure
+      reply.clearCookie('oidc_txn');
+      // Log safe diagnostic fields - do NOT leak auth code, client secret, token, cookie, state, or full callback URL
+      request.log.error({
+        err: {
+          name: error?.name,
+          code: error?.code,
+          status: error?.status,
+          message: error?.message,
+        },
+        error: error?.error,
+        error_description: error?.error_description,
+        configured_redirect_uri: env.OIDC_REDIRECT_URI,
+      }, 'OIDC token exchange failed');
+      // Return sanitized 502 - do not leak provider body
+      reply.status(502).send({ errors: [{ code: 'OIDC_TOKEN_EXCHANGE_FAILED', message: 'Unable to complete sign-in' }] });
+      return;
+    }
 
     // Get user info from ID token
-    const idToken = tokenSet.id_token;
+    const idToken = tokenSet!.id_token;
     if (!idToken) {
       reply.clearCookie('oidc_txn');
       reply.status(400).send({ errors: [{ code: 'BAD_REQUEST', message: 'No ID token' }] });
@@ -138,7 +176,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     let claims: any;
     try {
       // tokenSet provides claims() method for ID token
-      claims = tokenSet.claims();
+      claims = tokenSet!.claims();
     } catch {
       reply.clearCookie('oidc_txn');
       reply.status(400).send({ errors: [{ code: 'BAD_REQUEST', message: 'Invalid ID token' }] });
