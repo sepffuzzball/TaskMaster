@@ -1137,6 +1137,210 @@ describe('API behavior tests', () => {
     });
   });
 
+  describe('Defensive migration 004 repair scenario', () => {
+    it('applies 004 and allows tag/list/get/create/update after simulated 003 metadata with missing tables via real Kysely Migrator + NumericFileMigrationProvider', async () => {
+      const regressionDbPath = '/tmp/test-taskmaster-004-regression-' + randomUUID() + '.db';
+      const savedEnv = {
+        DB_DIALECT: process.env.DB_DIALECT,
+        SQLITE_PATH: process.env.SQLITE_PATH,
+        NODE_ENV: process.env.NODE_ENV,
+        APP_ORIGIN: process.env.APP_ORIGIN,
+        OIDC_ISSUER: process.env.OIDC_ISSUER,
+        OIDC_CLIENT_ID: process.env.OIDC_CLIENT_ID,
+        OIDC_CLIENT_SECRET: process.env.OIDC_CLIENT_SECRET,
+        OIDC_REDIRECT_URI: process.env.OIDC_REDIRECT_URI,
+        DEV_AUTH_BYPASS: process.env.DEV_AUTH_BYPASS,
+        OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+        SESSION_SECRET: process.env.SESSION_SECRET,
+      };
+
+      process.env.DB_DIALECT = 'sqlite';
+      process.env.SQLITE_PATH = regressionDbPath;
+
+      let regressionDb: any;
+      let regressionRepo: Repository;
+      let regressionApp: any;
+
+      try {
+        // Create a fresh DB
+        const { createDb: createDb2, migrateToLatest: migrateToLatest2, Repository: Repo2 } = await import('@taskmaster/db');
+        regressionDb = createDb2();
+
+        // Use the real Kysely Migrator + NumericFileMigrationProvider from run.ts
+        const { Migrator } = await import('kysely/migration');
+        const { NumericFileMigrationProvider } = await import('@taskmaster/db/migrations/run');
+        // Resolve migrations directory relative to where this test file lives
+        // The test file is at apps/api/test/api.test.ts
+        // Compiled migrations are at packages/db/dist/migrations
+        const currentFileUrl = new URL('.', import.meta.url);
+        const currentFilePath = fileURLToPath(currentFileUrl);
+        // The currentFilePath is /home/sepfy/git/taskmaster/apps/api/test/
+        // We need ../../../packages/db/dist/migrations
+        const migrationsDir = path.resolve(currentFilePath, '..', '..', '..', 'packages/db', 'dist', 'migrations');
+        const migrator = new Migrator({
+          db: regressionDb,
+          provider: new NumericFileMigrationProvider(migrationsDir),
+        });
+
+        // Apply migrations through 003-task-tags (which creates tags/task_tags tables)
+        const { results, error } = await migrator.migrateTo('003-task-tags');
+        expect(error).toBeUndefined();
+        const applied003 = results?.filter(r => r.status === 'Success').map(r => r.migrationName) || [];
+        expect(applied003).toContain('001-initial');
+        expect(applied003).toContain('002-oidc-transactions');
+        expect(applied003).toContain('003-task-tags');
+
+        // Verify that kysely_migration records show 003 was applied
+        const kyselyRecords = await sql`
+          SELECT name FROM kysely_migration WHERE name = '003-task-tags'
+        `.execute(regressionDb);
+        expect(kyselyRecords.rows.length).toBeGreaterThanOrEqual(1);
+
+        // Now deliberately drop both tag tables without altering migration metadata
+        await sql`DROP TABLE IF EXISTS task_tags`.execute(regressionDb);
+        await sql`DROP TABLE IF EXISTS tags`.execute(regressionDb);
+
+        // Verify tables are gone
+        const tagTableCheck = await sql`
+          SELECT name FROM sqlite_master WHERE type='table' AND name='tags'
+        `.execute(regressionDb);
+        expect(tagTableCheck.rows.length).toBe(0);
+        const ttTableCheck = await sql`
+          SELECT name FROM sqlite_master WHERE type='table' AND name='task_tags'
+        `.execute(regressionDb);
+        expect(ttTableCheck.rows.length).toBe(0);
+
+        // Now set app env to this DB, call buildApp() so startup applies 004
+        // Set DEV_AUTH_BYPASS so routes work without OIDC
+        process.env.DEV_AUTH_BYPASS = 'bypass-token';
+        process.env.APP_ORIGIN = savedEnv.APP_ORIGIN || 'http://localhost:3000';
+        process.env.OIDC_ISSUER = savedEnv.OIDC_ISSUER || 'http://localhost:9999';
+        process.env.OIDC_CLIENT_ID = savedEnv.OIDC_CLIENT_ID || 'test';
+        process.env.OIDC_CLIENT_SECRET = savedEnv.OIDC_CLIENT_SECRET || 'test';
+        process.env.OIDC_REDIRECT_URI = savedEnv.OIDC_REDIRECT_URI || 'http://localhost:3000/api/v1/auth/callback';
+        process.env.OPENAI_API_KEY = savedEnv.OPENAI_API_KEY || 'sk-test';
+        process.env.SESSION_SECRET = savedEnv.SESSION_SECRET || randomBytes(32).toString('hex');
+        process.env.NODE_ENV = 'test'; // stay in test mode for logger
+
+        const { buildApp: buildApp2 } = await import('../src/index.js');
+        regressionApp = await buildApp2();
+        await regressionApp.ready();
+
+        // Verify 004 was auto-applied by checking kysely_migration
+        const migrationRecords = await sql`
+          SELECT name FROM kysely_migration WHERE name = '004-ensure-task-tags'
+        `.execute(regressionDb);
+        expect(migrationRecords.rows.length).toBeGreaterThanOrEqual(1);
+
+        regressionRepo = new Repo2(regressionDb);
+
+        // Create dev-bypass user for auth bypass (required for routes)
+        const bypassUser = await regressionRepo.upsertUser('dev-bypass-issuer', 'dev-bypass');
+        const bypassUserId = bypassUser.id;
+
+        // Now verify tag operations work through app.inject (route-level)
+        // First create a user for FK constraints
+        const regressionUser = await regressionRepo.upsertUser('004-regression-issuer', '004-regression-subject');
+        const regressionUserId = regressionUser.id;
+
+        // Use app.inject to exercise GET /tags (list tags)
+        const listReply = await regressionApp.inject({ url: '/api/v1/tags' });
+        expect(listReply.statusCode).toBe(200);
+
+        // Use app.inject to create a tag via PUT /tags/:id (since POST not available, use createTag through repo + verify via GET)
+        // Actually we can create tag via repo and then test via app.inject
+        // But the GET /tags returns tags for the authenticated user (dev-bypass), so create tag for that user
+        const tag = await regressionRepo.createTag(bypassUserId, '004-repair-tag');
+        expect(tag).toBeDefined();
+
+        // Use app.inject to list tags again and verify the tag is there
+        const listReply2 = await regressionApp.inject({ url: '/api/v1/tags' });
+        expect(listReply2.statusCode).toBe(200);
+        const listBody2 = JSON.parse(listReply2.body);
+        expect(Array.isArray(listBody2)).toBe(true);
+        const tagNamesFromList = listBody2.map((t: any) => t.name);
+        expect(tagNamesFromList).toContain('004-repair-tag');
+
+        // Use app.inject to PUT /tags/:id to update the tag (no GET /tags/:id route exists)
+        const updateTagReply = await regressionApp.inject({
+          url: `/api/v1/tags/${tag.id}`,
+          method: 'PUT',
+          payload: { name: '004-repair-tag-updated', color: '#F56565', expectedVersion: tag.version },
+        });
+        expect(updateTagReply.statusCode).toBe(200);
+        const updateTagBody = JSON.parse(updateTagReply.body);
+        expect(updateTagBody.name).toBe('004-repair-tag-updated');
+
+        // Clean up the updated tag
+        const updatedTag = await regressionRepo.getTagById(tag.id);
+        if (updatedTag) {
+          await regressionRepo.deleteTag(tag.id, bypassUserId, updatedTag.version);
+        }
+
+        // Now test task creation with tags via app.inject
+        // First create a project and lane under the bypass user (since routes authenticate as that user)
+        const project = await regressionRepo.createProject(bypassUserId, '004 Repair Proj');
+        const lanes = await regressionRepo.listLanes(project.id);
+        // Use app.inject to POST /projects/:id/lanes/:id/tasks
+        const createTaskReply = await regressionApp.inject({
+          url: `/api/v1/projects/${project.id}/lanes/${lanes[0].id}/tasks`,
+          method: 'POST',
+          payload: { title: '004 Repair task with tags', tagNames: ['004-repair-tag'] },
+        });
+        expect(createTaskReply.statusCode).toBe(201);
+        const createTaskBody = JSON.parse(createTaskReply.body);
+        expect(createTaskBody.tags).toBeDefined();
+        expect(createTaskBody.tags.length).toBeGreaterThanOrEqual(1);
+
+        // Use app.inject to GET /projects/:id/tasks/:id to verify tags on fetch
+        const getTaskReply = await regressionApp.inject({
+          url: `/api/v1/projects/${project.id}/tasks/${createTaskBody.id}`,
+        });
+        expect(getTaskReply.statusCode).toBe(200);
+        const getTaskBody = JSON.parse(getTaskReply.body);
+        expect(getTaskBody.tags).toBeDefined();
+        expect(getTaskBody.tags.length).toBeGreaterThanOrEqual(1);
+
+        // Use app.inject to PUT /projects/:id/tasks/:id to update task tags
+        const updateTaskReply = await regressionApp.inject({
+          url: `/api/v1/projects/${project.id}/tasks/${createTaskBody.id}`,
+          method: 'PUT',
+          payload: { tagNames: ['004-repair-tag-updated'], expectedVersion: createTaskBody.version },
+        });
+        expect(updateTaskReply.statusCode).toBe(200);
+        const updateTaskBody = JSON.parse(updateTaskReply.body);
+        expect(updateTaskBody.tags).toBeDefined();
+        expect(updateTaskBody.tags.length).toBeGreaterThanOrEqual(1);
+
+        // Clean up
+        await regressionRepo.deleteTask(createTaskBody.id);
+      } finally {
+        if (regressionApp) {
+          await regressionApp.close();
+        }
+        if (regressionDb) {
+          await regressionDb.destroy();
+        }
+        // Restore original env vars
+        process.env.DB_DIALECT = savedEnv.DB_DIALECT;
+        process.env.SQLITE_PATH = savedEnv.SQLITE_PATH;
+        process.env.NODE_ENV = savedEnv.NODE_ENV;
+        process.env.APP_ORIGIN = savedEnv.APP_ORIGIN;
+        process.env.OIDC_ISSUER = savedEnv.OIDC_ISSUER;
+        process.env.OIDC_CLIENT_ID = savedEnv.OIDC_CLIENT_ID;
+        process.env.OIDC_CLIENT_SECRET = savedEnv.OIDC_CLIENT_SECRET;
+        process.env.OIDC_REDIRECT_URI = savedEnv.OIDC_REDIRECT_URI;
+        process.env.DEV_AUTH_BYPASS = savedEnv.DEV_AUTH_BYPASS;
+        process.env.OPENAI_API_KEY = savedEnv.OPENAI_API_KEY;
+        process.env.SESSION_SECRET = savedEnv.SESSION_SECRET;
+        // Clean up temp files
+        ['', '-wal', '-shm'].forEach(suffix => {
+          try { unlinkSync(regressionDbPath + suffix); } catch {}
+        });
+      }
+    });
+  });
+
   // --- buildCanonicalCallbackUrl helper tests ---
 
   describe('buildCanonicalCallbackUrl', () => {

@@ -47,8 +47,14 @@ async function buildApp() {
   const repo = new Repository(db);
   const services = new Services(repo);
 
+  const loggerConfig = {
+    redact: {
+      paths: ['authorization', 'cookie', 'set-cookie'],
+    },
+    enabled: process.env.NODE_ENV !== 'test',
+  };
   const app = fastify({
-    logger: false,
+    logger: loggerConfig,
   });
 
   // Register plugins

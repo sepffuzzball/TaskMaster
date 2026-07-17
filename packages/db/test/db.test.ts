@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { Repository, createDb, getDialect, ApiError, x0n } from '../dist/index.js';
 import { up as migrationUp, down as migrationDown } from '../dist/migrations/001-initial.js';
 import { up as migration003Up } from '../dist/migrations/003-task-tags.js';
+import { up as migration004Up, down as migration004Down } from '../dist/migrations/004-ensure-task-tags.js';
 import { sql } from 'kysely';
 import { randomUUID } from 'crypto';
 import path from 'path';
@@ -360,6 +361,147 @@ describe('db package', () => {
       });
     }
   });
+
+  describe('Migration 004', () => {
+    it('applies 004 safely even when 003 already applied', async () => {
+      const testDbPath = '/tmp/test-migration-004-' + randomUUID() + '.db';
+      process.env.DB_DIALECT = 'sqlite';
+      process.env.SQLITE_PATH = testDbPath;
+
+      const db = createDb();
+      try {
+        // Apply 001, 002, 003
+        await migrationUp(db);
+        await migration003Up(db);
+
+        // Now apply 004 - should be idempotent (tables already exist)
+        await migration004Up(db);
+
+        // Verify tags table still exists
+        const tagResult = await sql`
+          SELECT name FROM sqlite_master WHERE type='table' AND name='tags'
+        `.execute(db);
+        expect(tagResult.rows.length).toBeGreaterThanOrEqual(1);
+
+        // Verify task_tags table still exists
+        const ttResult = await sql`
+          SELECT name FROM sqlite_master WHERE type='table' AND name='task_tags'
+        `.execute(db);
+        expect(ttResult.rows.length).toBeGreaterThanOrEqual(1);
+
+        // Verify unique index exists
+        const idxResult = await sql`
+          SELECT name FROM sqlite_master WHERE type='index' AND name='idx_tags_user_id_normalized_name'
+        `.execute(db);
+        expect(idxResult.rows.length).toBeGreaterThanOrEqual(1, "Unique index idx_tags_user_id_normalized_name should exist");
+
+        // Verify we can do tag operations (to confirm schema is valid)
+        const testRepo = new Repository(db);
+        const user = await testRepo.upsertUser('004-test-issuer', '004-test-subject');
+        const tag = await testRepo.createTag(user.id, '004-tag');
+        expect(tag).toBeDefined();
+        await testRepo.deleteTag(tag.id, user.id, tag.version);
+
+        // Verify down is genuine no-op (does not drop tables or indexes)
+        await migration004Down(db);
+        // Tables should still exist after down
+        const tagResult2 = await sql`
+          SELECT name FROM sqlite_master WHERE type='table' AND name='tags'
+        `.execute(db);
+        expect(tagResult2.rows.length).toBeGreaterThanOrEqual(1, "tags table should remain after 004 down");
+      } finally {
+        await db.destroy();
+        ['', '-wal', '-shm'].forEach(suffix => {
+          try { unlinkSync(testDbPath + suffix); } catch {}
+        });
+      }
+    });
+
+    it('004 repairs missing tags/task_tags after pretend 003', async () => {
+      const testDbPath = '/tmp/test-migration-004-repair-' + randomUUID() + '.db';
+      process.env.DB_DIALECT = 'sqlite';
+      process.env.SQLITE_PATH = testDbPath;
+
+      const db = createDb();
+      try {
+        // Apply 001 only (skip 002/003)
+        await migrationUp(db);
+
+        // Apply 004 - should repair the missing tag tables
+        await migration004Up(db);
+
+        // Verify tags table exists
+        const tagResult = await sql`
+          SELECT name FROM sqlite_master WHERE type='table' AND name='tags'
+        `.execute(db);
+        expect(tagResult.rows.length).toBeGreaterThanOrEqual(1);
+
+        // Verify task_tags table exists
+        const ttResult = await sql`
+          SELECT name FROM sqlite_master WHERE type='table' AND name='task_tags'
+        `.execute(db);
+        expect(ttResult.rows.length).toBeGreaterThanOrEqual(1);
+
+        // Verify tag operations work
+        const testRepo = new Repository(db);
+        const user = await testRepo.upsertUser('004-repair-issuer', '004-repair-subject');
+        const tag = await testRepo.createTag(user.id, 'repair-tag');
+        expect(tag).toBeDefined();
+        await testRepo.deleteTag(tag.id, user.id, tag.version);
+
+        // Verify task creation with tags works
+        const project = await testRepo.createProject(user.id, 'Repair Project');
+        const lanes = await testRepo.listLanes(project.id);
+        const task = await testRepo.createTask(project.id, lanes[0].id, 'Repair task', undefined, undefined, ['repair-tag']);
+        expect(task.tags).toBeDefined();
+        expect(task.tags.length).toBeGreaterThanOrEqual(1);
+        await testRepo.deleteTask(task.id);
+      } finally {
+        await db.destroy();
+        ['', '-wal', '-shm'].forEach(suffix => {
+          try { unlinkSync(testDbPath + suffix); } catch {}
+        });
+      }
+    });
+
+    it('compiled migrator discovers 004', async () => {
+      const testDbPath = '/tmp/test-migration-004-discover-' + randomUUID() + '.db';
+      process.env.DB_DIALECT = 'sqlite';
+      process.env.SQLITE_PATH = testDbPath;
+
+      const db = createDb();
+      const { Migrator } = await import('kysely/migration');
+      const { NumericFileMigrationProvider } = await import('../dist/migrations/run.js');
+      const migrationsDir = path.resolve(__dirname, '..', 'dist', 'migrations');
+      const migrator = new Migrator({
+        db,
+        provider: new NumericFileMigrationProvider(migrationsDir),
+      });
+
+      try {
+        // First pass: discover and apply all migrations (including 004)
+        const { results, error } = await migrator.migrateToLatest();
+        expect(error).toBeUndefined();
+        const applied = results?.filter(r => r.status === 'Success').map(r => r.migrationName) || [];
+        expect(applied).toContain('001-initial');
+        expect(applied).toContain('002-oidc-transactions');
+        expect(applied).toContain('003-task-tags');
+        expect(applied).toContain('004-ensure-task-tags');
+
+        // Second pass: nothing new
+        const { results: results2, error: error2 } = await migrator.migrateToLatest();
+        expect(error2).toBeUndefined();
+        const applied2 = results2?.filter(r => r.status === 'Success').map(r => r.migrationName) || [];
+        expect(applied2.length).toBe(0);
+      } finally {
+        await db.destroy();
+        ['', '-wal', '-shm'].forEach(suffix => {
+          try { unlinkSync(testDbPath + suffix); } catch {}
+        });
+      }
+    });
+  });
+
 describe('Tag operations', () => {
   let repo: Repository;
   let userId: string;

@@ -36,7 +36,24 @@ export const errorHandlerPlugin = fastifyPlugin(async (fastify: FastifyInstance)
     }
 
     // Handle generic errors - log and return sanitized 500
-    request.log.error({ err: error }, 'Unhandled request error');
+    const { method } = request;
+    // Parse URL to sanitize pathname (strip query/hash)
+    let pathname: string;
+    try {
+      pathname = new URL(request.url, 'http://localhost').pathname;
+    } catch {
+      pathname = request.url;
+    }
+    request.log.error({
+      err: error,
+      requestId: request.id,
+      method,
+      pathname,
+    }, 'Unhandled request error');
+    // If not in test, also log to stdout for visibility - but use structured logging not raw console.error
+    if (process.env.NODE_ENV !== 'test') {
+      ; // already logged via request.log.error
+    }
     reply.status(500).send({
       errors: [{ code: 'INTERNAL_ERROR', message: 'An internal error occurred' }],
     });
