@@ -156,7 +156,7 @@ export class Services {
   async listTasks(projectId: string, laneId?: string, ownerId?: string) {
     await this.ensureProjectOwnership(projectId, ownerId);
     const rows = await this.repo.listTasks(projectId, laneId);
-    return rows.map(this.mapTask);
+    return rows.map(row => this.mapTask(row));
   }
 
   async getTaskById(taskId: string, ownerId?: string) {

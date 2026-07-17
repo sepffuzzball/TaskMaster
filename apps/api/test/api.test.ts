@@ -1559,6 +1559,34 @@ describe('API behavior tests', () => {
       await repo.deleteTask(body.id);
     });
 
+    it('lists project tasks and includes tags', async () => {
+      const createReply = await app.inject({
+        url: `/api/v1/projects/${testProjectId}/lanes/${testLaneId}/tasks`,
+        method: 'POST',
+        payload: { title: 'Task with list-tag', tagNames: ['list-tag'] },
+      });
+      expect(createReply.statusCode).toBe(201);
+      const created = JSON.parse(createReply.body);
+
+      const listReply = await app.inject({
+        url: `/api/v1/projects/${testProjectId}/tasks`,
+        method: 'GET',
+      });
+      expect(listReply.statusCode).toBe(200);
+      const listBody = JSON.parse(listReply.body);
+      // Find the task we just created
+      const foundTask = listBody.tasks ?? listBody.find((t: any) => t.id === created.id);
+      // If response is an array, use find; if nested, check tasks array
+      const task = Array.isArray(listBody) ? listBody.find((t: any) => t.id === created.id) : listBody.tasks?.find((t: any) => t.id === created.id);
+      expect(task).toBeDefined();
+      expect(task.tags).toBeDefined();
+      expect(task.tags.length).toBeGreaterThanOrEqual(1);
+      expect(task.tags[0].name).toBe('list-tag');
+
+      // Clean up
+      await repo.deleteTask(created.id);
+    });
+
     it('updates task tags', async () => {
       const createReply = await app.inject({
         url: `/api/v1/projects/${testProjectId}/lanes/${testLaneId}/tasks`,
