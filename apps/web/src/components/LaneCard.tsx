@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Trash, Plus, Sparkles, GripVertical } from 'lucide-react';
+import { Trash, Plus, Sparkles, GripVertical, Minimize2 } from 'lucide-react';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import type { Lane, Task } from '../types';
 import TaskCard from './TaskCard';
@@ -9,7 +9,8 @@ export type LaneDropEdge = 'none' | 'left' | 'right';
 export default function LaneCard({
   lane,
   tasks,
-  onRename,
+  onUpdate,
+  updatePending,
   onDelete,
   onAddTask,
   onAiBreakdown,
@@ -23,7 +24,8 @@ export default function LaneCard({
 }: {
   lane: Lane;
   tasks: Task[];
-  onRename: (name: string) => void;
+  onUpdate: (update: { name?: string; autoCollapse?: boolean }) => void;
+  updatePending: boolean;
   onDelete: () => void;
   onAddTask: () => void;
   onAiBreakdown: () => void;
@@ -51,8 +53,9 @@ export default function LaneCard({
   };
 
   const commitName = () => {
+    if (updatePending) return;
     setEditingName(false);
-    if (newName.trim() && newName !== lane.name) onRename(newName.trim());
+    if (newName.trim() && newName !== lane.name) onUpdate({ name: newName.trim() });
     else setNewName(lane.name);
   };
 
@@ -88,6 +91,7 @@ export default function LaneCard({
               if (e.key === 'Escape') { setNewName(lane.name); setEditingName(false); }
             }}
             aria-label="Lane name"
+            disabled={updatePending}
             autoFocus
           />
         ) : (
@@ -95,6 +99,7 @@ export default function LaneCard({
             type="button"
             className="lane-name-button"
             onClick={() => setEditingName(true)}
+            disabled={updatePending}
             title="Rename lane"
             aria-label={`Rename lane ${lane.name}`}
           >
@@ -103,6 +108,17 @@ export default function LaneCard({
           </button>
         )}
         <div className="lane-actions">
+          <button
+            type="button"
+            className={`btn-icon btn-small lane-auto-collapse ${lane.autoCollapse ? 'enabled' : ''}`}
+            onClick={() => onUpdate({ autoCollapse: !lane.autoCollapse })}
+            aria-label={`Auto-collapse task descriptions in ${lane.name}`}
+            title={`Auto-collapse task descriptions in ${lane.name}`}
+            aria-pressed={lane.autoCollapse}
+            disabled={updatePending}
+          >
+            <Minimize2 size={15} />
+          </button>
           <button
             type="button"
             className="btn-icon btn-small danger"
@@ -124,6 +140,7 @@ export default function LaneCard({
             <TaskCard
               key={task.id}
               task={task}
+              autoCollapse={lane.autoCollapse}
               onEdit={() => onEditTask(task.id)}
               onDelete={() => onDeleteTask(task.id)}
               insertIndicator={hasTaskActive && taskOverTaskId === task.id ? 'before' : 'none'}

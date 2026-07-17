@@ -19,4 +19,12 @@ describe('TaskDescription', () => {
     expect(screen.queryByTestId('unsafe')).toBeNull();
     expect(container.querySelector('span')).toBeNull();
   });
+
+  it('stays mounted while hidden so aria-controls can target it', () => {
+    render(<TaskDescription description="Still here" id="description-1" hidden />);
+    const description = document.getElementById('description-1');
+    expect(description).toBeInTheDocument();
+    expect(description).toHaveAttribute('hidden');
+    expect(description).toHaveTextContent('Still here');
+  });
 });

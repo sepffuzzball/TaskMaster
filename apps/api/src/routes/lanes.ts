@@ -30,10 +30,10 @@ export async function registerLaneRoutes(app: FastifyInstance) {
     reply.send((result as any).value);
   });
 
-  // PUT /projects/:projectId/lanes/:laneId - rename lane
+  // PUT /projects/:projectId/lanes/:laneId - update lane
   app.put<{ Params: { projectId: string; laneId: string } }>('/projects/:projectId/lanes/:laneId', async (request, reply) => {
     await app.requireAuth(request, reply);
-    const lane = await services.renameLane(request.params.laneId, request.params.projectId, request.ownerId!, request.body as any);
+    const lane = await services.updateLane(request.params.laneId, request.params.projectId, request.ownerId!, request.body as any);
     reply.send(lane);
   });
 

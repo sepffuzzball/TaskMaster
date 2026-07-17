@@ -128,8 +128,8 @@ function apiMock(handlers: Array<{ match: (url: string, opts?: any) => boolean; 
 function boardMock(extra: Array<{ match: (url: string, opts?: any) => boolean; response: (url: string, opts?: any) => Promise<Response> }>, opts: { projectVersion?: number; lanes?: any[]; tasks?: any[]; projects?: any[] } = {}) {
   const projectVersion = opts.projectVersion ?? 1;
   const lanes = opts.lanes ?? [
-    { id: 'lane1', name: 'Lane 1', version: 1, projectId: 'proj1', rank: 0, createdAt: '', updatedAt: '' },
-    { id: 'lane2', name: 'Lane 2', version: 1, projectId: 'proj1', rank: 1, createdAt: '', updatedAt: '' },
+    { id: 'lane1', name: 'Lane 1', version: 1, projectId: 'proj1', rank: 0, autoCollapse: false, createdAt: '', updatedAt: '' },
+    { id: 'lane2', name: 'Lane 2', version: 1, projectId: 'proj1', rank: 1, autoCollapse: false, createdAt: '', updatedAt: '' },
   ];
   const tasks = opts.tasks ?? [];
   const projects = opts.projects ?? [{ id: 'proj1', name: 'Test Proj', version: projectVersion, rank: 1, archivedAt: null, createdAt: '', updatedAt: '', ownerId: '1' }];
@@ -244,7 +244,63 @@ describe('App', () => {
       expect(deleteCalls.length).toBeGreaterThan(0);
       const deleteBody = JSON.parse(deleteCalls[deleteCalls.length - 1][1].body);
       expect(deleteBody.expectedProjectVersion).toBe(5);
+      const taskListCalls = vi.mocked(mockedFetch).mock.calls.filter((call: any) => call[0].includes('/projects/proj1/tasks'));
+      expect(taskListCalls.length).toBeGreaterThanOrEqual(2);
     });
+  });
+
+  it('toggles lane auto-collapse with current versions and disables lane controls while pending', async () => {
+    let resolveUpdate!: (response: Response) => void;
+    const updateResponse = new Promise<Response>(resolve => { resolveUpdate = resolve; });
+    const mockedFetch = boardMock([
+      {
+        match: (url, opts) => url.endsWith('/projects/proj1/lanes/lane1') && opts?.method === 'PUT',
+        response: () => updateResponse,
+      },
+    ], { projectVersion: 9, lanes: [
+      { id: 'lane1', name: 'Complete', version: 4, projectId: 'proj1', rank: 0, autoCollapse: false, createdAt: '', updatedAt: '' },
+    ] });
+    global.fetch = mockedFetch;
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+
+    const toggle = await screen.findByRole('button', { name: 'Auto-collapse task descriptions in Complete' });
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await user.click(toggle);
+    expect(toggle).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Rename lane Complete' })).toBeDisabled();
+
+    const updateCall = vi.mocked(mockedFetch).mock.calls.find((call: any) => call[0].endsWith('/projects/proj1/lanes/lane1') && call[1]?.method === 'PUT');
+    expect(updateCall).toBeDefined();
+    expect(JSON.parse(updateCall![1].body)).toEqual({ autoCollapse: true, expectedVersion: 4, expectedProjectVersion: 9 });
+
+    resolveUpdate(mockResponseObject({ id: 'lane1', name: 'Complete', version: 5, projectId: 'proj1', rank: 0, autoCollapse: true }));
+    await waitFor(() => expect(toggle).not.toBeDisabled());
+  });
+
+  it('shows an accessible description toggle only for tasks with descriptions', async () => {
+    const tasks = [
+      { id: 'task1', title: 'Document release', description: '**Ready** to ship', version: 1, projectId: 'proj1', laneId: 'lane1', rank: 0, tags: [], createdAt: '', updatedAt: '' },
+      { id: 'task2', title: 'No details', version: 1, projectId: 'proj1', laneId: 'lane1', rank: 1, tags: [], createdAt: '', updatedAt: '' },
+    ];
+    global.fetch = boardMock([], { tasks });
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+
+    const collapse = await screen.findByRole('button', { name: 'Collapse description for Document release' });
+    expect(collapse).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.queryByRole('button', { name: /description for No details/ })).toBeNull();
+    const descriptionId = collapse.getAttribute('aria-controls');
+    const description = document.getElementById(descriptionId!);
+    expect(description).toBeVisible();
+    expect(screen.getByText('Ready').tagName).toBe('STRONG');
+
+    await user.click(collapse);
+    expect(screen.getByRole('button', { name: 'Expand description for Document release' })).toHaveAttribute('aria-expanded', 'false');
+    expect(description).toHaveAttribute('hidden');
+    expect(description).toBeInTheDocument();
   });
 
   it('lane reorder request includes expectedProjectVersion equal to project version', async () => {

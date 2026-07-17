@@ -37,6 +37,7 @@ export interface LaneRow {
   name: string;
   rank: number;
   version: number;
+  auto_collapse: number;
   created_at: string;
   updated_at: string;
 }
@@ -224,9 +225,10 @@ export class Repository {
       // Create default lanes atomically
       for (const lane of DEFAULT_LANES_SPEC) {
         const laneId = randomUUID();
+        const autoCollapse = lane.name === 'Complete' ? 1 : 0;
         await sql`
-          INSERT INTO lanes (id, project_id, name, rank, version, created_at, updated_at)
-          VALUES (${laneId}, ${id}, ${lane.name}, ${lane.rank}, 0, ${now}, ${now})
+          INSERT INTO lanes (id, project_id, name, rank, version, auto_collapse, created_at, updated_at)
+          VALUES (${laneId}, ${id}, ${lane.name}, ${lane.rank}, 0, ${autoCollapse}, ${now}, ${now})
         `.execute(trx as any);
       }
 
@@ -315,7 +317,7 @@ export class Repository {
 
   // --- Lane ops ---
 
-  async createLane(projectId: string, name: string, expectedProjectVersion: number, rank?: number): Promise<LaneRow> {
+  async createLane(projectId: string, name: string, expectedProjectVersion: number, rank?: number, autoCollapse?: boolean): Promise<LaneRow> {
     return this.transaction(async (trx) => {
       const id = randomUUID();
       const now = new Date().toISOString();
@@ -347,12 +349,13 @@ export class Repository {
       }
 
       await sql`
-        INSERT INTO lanes (id, project_id, name, rank, version, created_at, updated_at)
-        VALUES (${id}, ${projectId}, ${name}, ${actualRank}, 0, ${now}, ${now})
+        INSERT INTO lanes (id, project_id, name, rank, version, auto_collapse, created_at, updated_at)
+        VALUES (${id}, ${projectId}, ${name}, ${actualRank}, 0, ${autoCollapse ? 1 : 0}, ${now}, ${now})
       `.execute(trx as any);
 
       return {
         id, project_id: projectId, name, rank: actualRank, version: 0,
+        auto_collapse: autoCollapse ? 1 : 0,
         created_at: now, updated_at: now,
       };
     });
@@ -369,7 +372,11 @@ export class Repository {
     return result.rows as any[] as LaneRow[];
   }
 
-  async renameLane(laneId: string, projectId: string, newName: string, expectedLaneVersion: number, expectedProjectVersion: number): Promise<LaneRow> {
+  async updateLane(
+    laneId: string, projectId: string,
+    updates: { name?: string; autoCollapse?: boolean },
+    expectedLaneVersion: number, expectedProjectVersion: number,
+  ): Promise<LaneRow> {
     return this.transaction(async (trx) => {
       const now = new Date().toISOString();
 
@@ -384,8 +391,13 @@ export class Repository {
       const projectResult = await sql`SELECT * FROM projects WHERE id = ${projectId}`.execute(trx as any);
       const projectRow = (projectResult.rows as any[])[0];
       if (!projectRow) throw new ApiError(404, 'NOT_FOUND');
-      if (projectRow.archived_at) throw new ApiError(400, 'BAD_REQUEST', 'Cannot rename lane in archived project');
+      if (projectRow.archived_at) throw new ApiError(400, 'BAD_REQUEST', 'Cannot update lane in archived project');
       if (projectRow.version !== expectedProjectVersion) throw new ApiError(409, 'STALE_VERSION');
+
+      // If no mutable fields provided, reject
+      if (updates.name === undefined && updates.autoCollapse === undefined) {
+        throw new ApiError(400, 'BAD_REQUEST', 'No mutable fields provided');
+      }
 
       // Increment project version conditionally
       const projUpdate = await sql`
@@ -397,9 +409,19 @@ export class Repository {
         throw new ApiError(409, 'STALE_VERSION');
       }
 
-      // Update the lane with version check
+      // Build the lane update query with proper parameterization using sql.join
+      const updateParts: ReturnType<typeof sql>[] = [];
+      updateParts.push(sql`updated_at = ${now}`);
+      updateParts.push(sql`version = version + 1`);
+      if (updates.name !== undefined) {
+        updateParts.push(sql`name = ${updates.name}`);
+      }
+      if (updates.autoCollapse !== undefined) {
+        updateParts.push(sql`auto_collapse = ${updates.autoCollapse ? 1 : 0}`);
+      }
+
       const laneUpdate = await sql`
-        UPDATE lanes SET name = ${newName}, updated_at = ${now}, version = version + 1
+        UPDATE lanes SET ${sql.join(updateParts, sql`, `)}
         WHERE id = ${laneId} AND version = ${expectedLaneVersion}
       `.execute(trx as any);
       const numLaneUpdated = (laneUpdate as any).numUpdatedRows ?? (laneUpdate as any).numAffectedRows ?? 0n;
@@ -797,9 +819,10 @@ export class Repository {
       // Create 3 lanes with the correct names
       for (const lane of DEFAULT_LANES_SPEC) {
         const laneId = randomUUID();
+        const autoCollapse = lane.name === 'Complete' ? 1 : 0;
         await sql`
-          INSERT INTO lanes (id, project_id, name, rank, version, created_at, updated_at)
-          VALUES (${laneId}, ${projectId}, ${lane.name}, ${lane.rank}, 0, ${now}, ${now})
+          INSERT INTO lanes (id, project_id, name, rank, version, auto_collapse, created_at, updated_at)
+          VALUES (${laneId}, ${projectId}, ${lane.name}, ${lane.rank}, 0, ${autoCollapse}, ${now}, ${now})
         `.execute(trx as any);
       }
 

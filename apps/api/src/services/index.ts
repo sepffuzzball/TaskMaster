@@ -89,7 +89,9 @@ export class Services {
   async createLane(projectId: string, ownerId: string, input: shared.CreateLaneInput) {
     const parsed = shared.CreateLaneInput.parse(input);
     await this.ensureProjectOwnership(projectId, ownerId);
-    const row = await this.repo.createLane(projectId, parsed.name, parsed.expectedProjectVersion, parsed.rank);
+    const isCompleteName = (name: string): boolean => name.trim().toLowerCase() === 'complete';
+    const autoCollapse = parsed.autoCollapse ?? isCompleteName(parsed.name);
+    const row = await this.repo.createLane(projectId, parsed.name, parsed.expectedProjectVersion, parsed.rank, autoCollapse);
     return this.mapLane(row);
   }
 
@@ -110,7 +112,7 @@ export class Services {
     return { value: this.mapLane(row) };
   }
 
-  async renameLane(laneId: string, projectId: string, ownerId: string, input: shared.UpdateLaneInput) {
+  async updateLane(laneId: string, projectId: string, ownerId: string, input: shared.UpdateLaneInput) {
     const parsed = shared.UpdateLaneInput.parse(input);
     await this.ensureProjectOwnership(projectId, ownerId);
     // Verify lane belongs to this project
@@ -118,7 +120,16 @@ export class Services {
     if (!lane || lane.project_id !== projectId) {
       throw new ApiError(404, 'NOT_FOUND');
     }
-    const row = await this.repo.renameLane(laneId, projectId, parsed.name!, parsed.expectedVersion, parsed.expectedProjectVersion);
+    // Build updates object from parsed input, preserving omitted fields
+    const updates: { name?: string; autoCollapse?: boolean } = {};
+    if (parsed.name !== undefined) {
+      updates.name = parsed.name;
+    }
+    if (parsed.autoCollapse !== undefined) {
+      // Explicit autoCollapse always wins (including false)
+      updates.autoCollapse = parsed.autoCollapse;
+    }
+    const row = await this.repo.updateLane(laneId, projectId, updates, parsed.expectedVersion, parsed.expectedProjectVersion);
     return this.mapLane(row);
   }
 
@@ -422,6 +433,7 @@ export class Services {
       projectId: row.project_id,
       name: row.name,
       rank: row.rank,
+      autoCollapse: row.auto_collapse === 1,
       version: row.version,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

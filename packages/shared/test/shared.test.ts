@@ -41,4 +41,39 @@ describe('shared package', () => {
     expect(input.name).toBe('new-name');
     expect(input.color).toBe('#3182CE');
   });
+
+  it('Lane schema requires autoCollapse boolean', () => {
+    const validLane = {
+      id: '12345678-1234-1234-1234-123456789abc',
+      projectId: '22345678-2234-2234-2234-223456789abc',
+      name: 'Test Lane',
+      rank: 0,
+      autoCollapse: true,
+      version: 0,
+      createdAt: '2024-01-01T00:00:00Z',
+      updatedAt: '2024-01-01T00:00:00Z',
+    };
+    expect(() => shared.Lane.parse(validLane)).not.toThrow();
+    // Missing autoCollapse should fail
+    const { autoCollapse, ...withoutAutoCollapse } = validLane;
+    expect(() => shared.Lane.parse(withoutAutoCollapse)).toThrow();
+  });
+
+  it('CreateLaneInput accepts optional autoCollapse', () => {
+    const inputWithout = shared.CreateLaneInput.parse({ name: 'New Lane', expectedProjectVersion: 0 });
+    expect(inputWithout.autoCollapse).toBeUndefined();
+    const inputWith = shared.CreateLaneInput.parse({ name: 'New Lane', autoCollapse: false, expectedProjectVersion: 0 });
+    expect(inputWith.autoCollapse).toBe(false);
+  });
+
+  it('UpdateLaneInput accepts optional autoCollapse and rejects empty', () => {
+    // Empty (no name, no rank, no autoCollapse) should fail
+    expect(() => shared.UpdateLaneInput.parse({ expectedVersion: 0, expectedProjectVersion: 0 })).toThrow();
+    // With autoCollapse only should succeed
+    const inputWith = shared.UpdateLaneInput.parse({ autoCollapse: true, expectedVersion: 0, expectedProjectVersion: 0 });
+    expect(inputWith.autoCollapse).toBe(true);
+    // With name only should succeed
+    const inputName = shared.UpdateLaneInput.parse({ name: 'Test', expectedVersion: 0, expectedProjectVersion: 0 });
+    expect(inputName.name).toBe('Test');
+  });
 });

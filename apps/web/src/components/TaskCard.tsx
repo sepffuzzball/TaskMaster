@@ -1,13 +1,15 @@
-import { Edit, Trash } from 'lucide-react';
+import { ChevronDown, ChevronRight, Edit, Trash } from 'lucide-react';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import type { Task } from '../types';
 import TagChip from './TagChip';
 import TaskDescription from './TaskDescription';
+import { useTaskDescriptionCollapse } from '../hooks/useTaskDescriptionCollapse';
 
 type InsertIndicator = 'none' | 'before';
 
 export default function TaskCard({
   task,
+  autoCollapse,
   onEdit,
   onDelete,
   insertIndicator = 'none',
@@ -16,6 +18,7 @@ export default function TaskCard({
   dragDisabled = false,
 }: {
   task: Task;
+  autoCollapse: boolean;
   onEdit: () => void;
   onDelete: () => void;
   /** Show a crisp horizontal insertion line above this card. */
@@ -26,6 +29,8 @@ export default function TaskCard({
   dimmed?: boolean;
   dragDisabled?: boolean;
 }) {
+  const descriptionCollapse = useTaskDescriptionCollapse(task.id, task.laneId, autoCollapse);
+  const descriptionId = `task-description-${task.id}`;
   const dragData = { type: 'task', taskId: task.id, title: task.title, laneId: task.laneId, version: task.version };
   const draggable = useDraggable({ id: task.id, data: dragData, disabled: dragDisabled });
   const droppable = useDroppable({ id: task.id, data: dragData, disabled: dragDisabled });
@@ -92,8 +97,24 @@ export default function TaskCard({
         </button>
       </div>
       <div className="task-body">
-        <div className="task-title">{task.title}</div>
-        {task.description && <TaskDescription description={task.description} />}
+        <div className="task-title-row">
+          <div className="task-title">{task.title}</div>
+          {task.description && (
+            <button
+              type="button"
+              className="task-description-toggle"
+              onPointerDown={event => event.stopPropagation()}
+              onClick={descriptionCollapse.toggle}
+              aria-label={`${descriptionCollapse.collapsed ? 'Expand' : 'Collapse'} description for ${task.title}`}
+              title={`${descriptionCollapse.collapsed ? 'Expand' : 'Collapse'} description for ${task.title}`}
+              aria-expanded={!descriptionCollapse.collapsed}
+              aria-controls={descriptionId}
+            >
+              {descriptionCollapse.collapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+            </button>
+          )}
+        </div>
+        {task.description && <TaskDescription description={task.description} id={descriptionId} hidden={descriptionCollapse.collapsed} />}
       </div>
       {!!task.tags?.length && <div className="task-tags" aria-label={`Tags for ${task.title}`}>
         {task.tags.map(tag => <TagChip key={tag.id} name={tag.name} color={tag.color} compact />)}

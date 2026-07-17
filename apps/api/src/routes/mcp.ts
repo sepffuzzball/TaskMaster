@@ -24,8 +24,8 @@ export async function registerMcpRoutes(app: FastifyInstance) {
   const emptyInput = z.object({});
   const projectIdInput = z.object({ projectId: z.string(), expectedVersion: z.number().int().optional() });
   const createProjectInput = z.object({ name: z.string(), description: z.string().optional() });
-  const createLaneInput = z.object({ projectId: z.string(), name: z.string(), rank: z.number().int().optional(), expectedProjectVersion: z.number().int() });
-  const renameLaneInput = z.object({ laneId: z.string(), projectId: z.string(), name: z.string(), expectedVersion: z.number().int(), expectedProjectVersion: z.number().int() });
+  const createLaneInput = z.object({ projectId: z.string(), name: z.string(), rank: z.number().int().optional(), autoCollapse: z.boolean().optional(), expectedProjectVersion: z.number().int() });
+  const renameLaneInput = z.object({ laneId: z.string(), projectId: z.string(), name: z.string().optional(), autoCollapse: z.boolean().optional(), expectedVersion: z.number().int(), expectedProjectVersion: z.number().int() });
   const reorderLanesInput = z.object({ projectId: z.string(), laneIds: z.array(z.string()), expectedProjectVersion: z.number().int() });
   const listTasksInput = z.object({ projectId: z.string(), laneId: z.string().optional() });
   const createTaskInput = z.object({ projectId: z.string(), laneId: z.string(), title: z.string(), description: z.string().optional(), tagNames: z.array(z.string()).optional() });
@@ -114,13 +114,13 @@ export async function registerMcpRoutes(app: FastifyInstance) {
     });
 
     server.registerTool('rename_lane', {
-      description: 'Rename a lane',
+      description: 'Rename or update a lane',
       inputSchema: renameLaneInput,
     }, async (args: any, extra: any) => {
       assertWriteScopes(extra.authInfo, 'rename_lane');
       const ownerId = extra.authInfo?.token || 'bypass';
-      const validated = shared.UpdateLaneInput.parse({ name: args.name, expectedVersion: args.expectedVersion, expectedProjectVersion: args.expectedProjectVersion });
-      const lane = await services.renameLane(args.laneId, args.projectId, ownerId, validated);
+      const validated = shared.UpdateLaneInput.parse({ name: args.name, autoCollapse: args.autoCollapse, expectedVersion: args.expectedVersion, expectedProjectVersion: args.expectedProjectVersion });
+      const lane = await services.updateLane(args.laneId, args.projectId, ownerId, validated);
       return { content: [{ type: 'text', text: JSON.stringify(lane) }] };
     });
 

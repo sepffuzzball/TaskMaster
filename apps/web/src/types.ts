@@ -23,6 +23,7 @@ export type Lane = {
   projectId: string;
   name: string;
   rank: number;
+  autoCollapse: boolean;
   version: number;
   createdAt: string;
   updatedAt: string;

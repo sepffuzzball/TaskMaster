@@ -73,6 +73,7 @@ export const Lane = z.object({
   projectId: uuid,
   name: z.string().max(80),
   rank: z.number().int().nonnegative(),
+  autoCollapse: z.boolean(),
   version: version,
   createdAt: iso8601,
   updatedAt: iso8601,
@@ -135,16 +136,20 @@ export type UpdateProjectInput = z.infer<typeof UpdateProjectInput>;
 export const CreateLaneInput = z.object({
   name: z.string().max(80),
   rank: z.number().int().nonnegative().optional(),
+  autoCollapse: z.boolean().optional(),
   expectedProjectVersion: version,
 });
 export type CreateLaneInput = z.infer<typeof CreateLaneInput>;
 
 export const UpdateLaneInput = z.object({
   name: z.string().max(80).optional(),
-  rank: z.number().int().nonnegative().optional(),
+  autoCollapse: z.boolean().optional(),
   expectedVersion: version,
   expectedProjectVersion: version,
-});
+}).refine(
+  (input) => input.name !== undefined || input.autoCollapse !== undefined,
+  { message: 'At least one of name or autoCollapse must be provided', path: [] },
+);
 export type UpdateLaneInput = z.infer<typeof UpdateLaneInput>;
 
 export const CreateTaskInput = z.object({

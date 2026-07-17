@@ -557,7 +557,7 @@ describe('API behavior tests', () => {
       }
     });
 
-    it('rejects rename lane in archived project', async () => {
+    it('rejects update lane in archived project', async () => {
       const userRow = await repo.upsertUser('arch-rename-lane', 'arch-rename-lane-subj');
       const project = await repo.createProject(userRow.id, 'ArchRenameLaneProj');
       const projVer0 = await getProjectVersion(project.id);
@@ -565,7 +565,7 @@ describe('API behavior tests', () => {
       const projVerAfterLane = await getProjectVersion(project.id);
       await repo.archiveProject(project.id, userRow.id, projVerAfterLane);
       try {
-        await repo.renameLane(lane.id, project.id, 'Renamed', 0, projVerAfterLane);
+        await repo.updateLane(lane.id, project.id, { name: 'Renamed' }, 0, projVerAfterLane);
         expect.fail('Should throw');
       } catch (e: any) {
         expect(e.code).toBe('BAD_REQUEST');
@@ -661,7 +661,7 @@ describe('API behavior tests', () => {
     expect(fresh!.name).toBe('AtomicStaleProj');
   });
 
-  it('atomic stale lane rename rejection', async () => {
+  it('atomic stale lane update rejection', async () => {
     const userRow = await repo.upsertUser('atomic-stale-lane', 'atomic-stale-lane-sub');
     const project = await repo.createProject(userRow.id, 'AtomicStaleLaneProj');
     const projVer = await getProjectVersion(project.id);
@@ -669,7 +669,7 @@ describe('API behavior tests', () => {
     const laneVer = lane.version;
     try {
       // Pass wrong lane version and wrong project version
-      await repo.renameLane(lane.id, project.id, 'LaneRenamed', 999, projVer);
+      await repo.updateLane(lane.id, project.id, { name: 'LaneRenamed' }, 999, projVer);
       expect.fail('Should throw STALE_VERSION');
     } catch (e: any) {
       expect(e.code).toBe('STALE_VERSION');

@@ -565,19 +565,21 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
     onError: (e: any) => triggerToast(e.errors?.[0]?.message || 'Failed to create lane', 'danger'),
   });
 
-  const renameLaneMut = useMutation({
-    mutationFn: ({ laneId, name, expectedVersion }: { laneId: string; name: string; expectedVersion: number }) =>
-      api.lanes.rename(projectId, laneId, { name, expectedVersion, expectedProjectVersion: project.version }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['lanes', projectId] });
-      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
-      triggerToast('Lane renamed', 'success');
+  const updateLaneMut = useMutation({
+    mutationFn: ({ laneId, update, expectedVersion, expectedProjectVersion }: { laneId: string; update: { name?: string; autoCollapse?: boolean }; expectedVersion: number; expectedProjectVersion: number }) =>
+      api.lanes.update(projectId, laneId, { ...update, expectedVersion, expectedProjectVersion }),
+    onSuccess: async (_lane, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['lanes', projectId] }),
+        queryClient.invalidateQueries({ queryKey: ['project', projectId] }),
+      ]);
+      triggerToast(variables.update.name !== undefined ? 'Lane renamed' : 'Lane updated', 'success');
     },
     onError: (e: any) => {
       if (e.errors?.[0]?.code === 'STALE_VERSION') {
         triggerToast('Stale version - refresh to see changes', 'danger');
       } else {
-        triggerToast(e.errors?.[0]?.message || 'Failed to rename lane', 'danger');
+        triggerToast(e.errors?.[0]?.message || 'Failed to update lane', 'danger');
       }
     },
   });
@@ -881,6 +883,7 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
     api.lanes.delete(projectId, laneId, { targetLaneId, expectedProjectVersion: project.version }).then(() => {
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       queryClient.invalidateQueries({ queryKey: ['lanes', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['tasks', projectId] });
       triggerToast('Lane deleted', 'success');
       setShowingDeleteLane(null);
     }).catch((e: any) => triggerToast(e.errors?.[0]?.message || 'Delete failed', 'danger'));
@@ -1104,7 +1107,8 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
                   key={lane.id}
                   lane={lane}
                   tasks={tasksByLane(lane.id)}
-                  onRename={(name: string) => renameLaneMut.mutate({ laneId: lane.id, name, expectedVersion: lane.version })}
+                  onUpdate={(update) => updateLaneMut.mutate({ laneId: lane.id, update, expectedVersion: lane.version, expectedProjectVersion: project.version })}
+                  updatePending={updateLaneMut.isPending}
                   onDelete={() => setShowingDeleteLane(lane.id)}
                   onAddTask={() => setAddTaskLaneId(lane.id)}
                   onAiBreakdown={() => setShowAiBreakdown({ laneId: lane.id })}

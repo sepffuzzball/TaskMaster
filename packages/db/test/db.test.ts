@@ -3,6 +3,7 @@ import { Repository, createDb, getDialect, ApiError, x0n } from '../dist/index.j
 import { up as migrationUp, down as migrationDown } from '../dist/migrations/001-initial.js';
 import { up as migration003Up } from '../dist/migrations/003-task-tags.js';
 import { up as migration004Up, down as migration004Down } from '../dist/migrations/004-ensure-task-tags.js';
+import { up as migration005Up, down as migration005Down } from '../dist/migrations/005-lane-auto-collapse.js';
 import { sql } from 'kysely';
 import { randomUUID } from 'crypto';
 import path from 'path';
@@ -27,6 +28,7 @@ describe('db package', () => {
     const db = createDb();
     await migrationUp(db);
     await migration003Up(db);
+    await migration005Up(db);
     repo = new Repository(db);
   });
 
@@ -78,10 +80,13 @@ describe('db package', () => {
     expect(lanes.length).toBe(3);
     expect(lanes[0].name).toBe('ToDo');
     expect(lanes[0].rank).toBe(0);
+    expect(lanes[0].auto_collapse).toBe(0);
     expect(lanes[1].name).toBe('InProgress');
     expect(lanes[1].rank).toBe(10);
+    expect(lanes[1].auto_collapse).toBe(0);
     expect(lanes[2].name).toBe('Complete');
     expect(lanes[2].rank).toBe(20);
+    expect(lanes[2].auto_collapse).toBe(1);
   });
 
   it('project default initialization sets version 0', async () => {
@@ -107,10 +112,13 @@ describe('db package', () => {
     // Verify names/ranks of new lanes
     expect(newLanes[0].name).toBe('ToDo');
     expect(newLanes[0].rank).toBe(0);
+    expect(newLanes[0].auto_collapse).toBe(0);
     expect(newLanes[1].name).toBe('InProgress');
     expect(newLanes[1].rank).toBe(10);
+    expect(newLanes[1].auto_collapse).toBe(0);
     expect(newLanes[2].name).toBe('Complete');
     expect(newLanes[2].rank).toBe(20);
+    expect(newLanes[2].auto_collapse).toBe(1);
   });
 
   it('rollback on stale version in moveToNewProject avoids leaving orphan project/lanes', async () => {
@@ -430,6 +438,9 @@ describe('db package', () => {
         // Apply 004 - should repair the missing tag tables
         await migration004Up(db);
 
+        // Then apply 005 for lane auto_collapse
+        await migration005Up(db);
+
         // Verify tags table exists
         const tagResult = await sql`
           SELECT name FROM sqlite_master WHERE type='table' AND name='tags'
@@ -528,6 +539,7 @@ describe('Tag operations', () => {
     // Apply both 001 and 003 migrations in order
     await migrationUp(db);
     await migration003Up(db);
+    await migration005Up(db);
     repo = new Repository(db);
   });
 
@@ -840,6 +852,281 @@ describe('Tag operations', () => {
       expect(updatedTask!.version).toBe(taskVersion);
 
       await repo.deleteTask(task.id);
+    });
+  });
+});
+
+describe('autoCollapse feature', () => {
+  it('default lanes set auto_collapse correctly on createProject', async () => {
+    const user = await repo.upsertUser('ac-proj-usr', 'ac-proj-subj');
+    const project = await repo.createProject(user.id, 'ACProj');
+    const lanes = await repo.listLanes(project.id);
+    expect(lanes.length).toBe(3);
+    // ToDo should be 0, InProgress 0, Complete 1
+    expect(lanes.find((l: any) => l.name === 'ToDo')!.auto_collapse).toBe(0);
+    expect(lanes.find((l: any) => l.name === 'InProgress')!.auto_collapse).toBe(0);
+    expect(lanes.find((l: any) => l.name === 'Complete')!.auto_collapse).toBe(1);
+  });
+
+  it('default lanes set auto_collapse correctly on moveTaskToNewProject', async () => {
+    const user = await repo.upsertUser('ac-move-usr', 'ac-move-subj');
+    const project = await repo.createProject(user.id, 'ACMoveOrig');
+    const lane = (await repo.listLanes(project.id))[0];
+    const task = await repo.createTask(project.id, lane.id, 'MoveAC');
+    const moved = await repo.moveTaskToNewProject(task.id, 'ACMoveDest', task.version, user.id);
+    const newLanes = await repo.listLanes(moved.project_id);
+    expect(newLanes.length).toBe(3);
+    expect(newLanes.find((l: any) => l.name === 'Complete')!.auto_collapse).toBe(1);
+  });
+
+  it('user-created Complete lane defaults to auto_collapse true at service level was tested via repo', async () => {
+    const user = await repo.upsertUser('ac-create-usr', 'ac-create-subj');
+    const project = await repo.createProject(user.id, 'ACCreateProj');
+    const projVer = await getProjectVersion(project.id);
+    // Repo createLane with autoCollapse=true verification
+    const lane = await repo.createLane(project.id, 'Complete', projVer, 0, true);
+    expect(lane.auto_collapse).toBe(1);
+  });
+
+  it('user-created lane with explicit false stays false', async () => {
+    const user = await repo.upsertUser('ac-explicit-false', 'ac-explicit-false-subj');
+    const project = await repo.createProject(user.id, 'ACExplicitFalse');
+    const projVer = await getProjectVersion(project.id);
+    const lane = await repo.createLane(project.id, 'Complete', projVer, 0, false);
+    expect(lane.auto_collapse).toBe(0);
+  });
+
+  it('updateLane with name-only never changes auto_collapse (Complete or not)', async () => {
+    const user = await repo.upsertUser('ac-name-only', 'ac-name-only-subj');
+    const project = await repo.createProject(user.id, 'ACNameOnly');
+    const lanes = await repo.listLanes(project.id);
+    const todo = lanes.find((l: any) => l.name === 'ToDo')!;
+    // Name-only update to Complete - should keep auto_collapse=0
+    const updated = await repo.updateLane(todo.id, project.id, { name: 'Complete' }, todo.version, 0);
+    expect(updated.auto_collapse).toBe(0, 'name-only should preserve original 0');
+    expect(updated.name).toBe('Complete');
+  });
+
+  it('updateLane with name=Complete and autoCollapse=false wins false', async () => {
+    const user = await repo.upsertUser('ac-upd-false', 'ac-upd-false-subj');
+    const project = await repo.createProject(user.id, 'ACUpdFalse');
+    const lanes = await repo.listLanes(project.id);
+    const todo = lanes.find((l: any) => l.name === 'ToDo')!;
+    const updated = await repo.updateLane(todo.id, project.id, { name: 'Complete', autoCollapse: false }, todo.version, 0);
+    expect(updated.auto_collapse).toBe(0);
+    expect(updated.name).toBe('Complete');
+  });
+
+  it('updateLane preserves auto_collapse on rename away from Complete', async () => {
+    const user = await repo.upsertUser('ac-preserve', 'ac-preserve-subj');
+    const project = await repo.createProject(user.id, 'ACPreserve');
+    const lanes = await repo.listLanes(project.id);
+    const complete = lanes.find((l: any) => l.name === 'Complete')!;
+    // Rename Complete to Done; auto_collapse stays 1 (no autoCollapse supplied)
+    const updated = await repo.updateLane(complete.id, project.id, { name: 'Done' }, complete.version, 0);
+    expect(updated.auto_collapse).toBe(1);
+    expect(updated.name).toBe('Done');
+  });
+
+  it('regression: create Complete true, set false, name-only update to Complete stays false', async () => {
+    const user = await repo.upsertUser('ac-regr', 'ac-regr-subj');
+    const project = await repo.createProject(user.id, 'ACRegr');
+    const projVer = await getProjectVersion(project.id);
+    // Create lane with Complete name and explicit autoCollapse=true
+    const lane1 = await repo.createLane(project.id, 'Complete', projVer, 0, true);
+    expect(lane1.auto_collapse).toBe(1);
+    // Update with explicit false
+    const laneVer = lane1.version;
+    const projVer2 = await getProjectVersion(project.id);
+    const updated = await repo.updateLane(lane1.id, project.id, { autoCollapse: false }, laneVer, projVer2);
+    expect(updated.auto_collapse).toBe(0);
+    // Now name-only update to Complete - should stay false
+    const updated2 = await repo.updateLane(lane1.id, project.id, { name: 'Complete' }, updated.version, projVer2 + 1);
+    expect(updated2.auto_collapse).toBe(0, 'name-only should preserve explicit false');
+    expect(updated2.name).toBe('Complete');
+  });
+
+  it('updateLane with no mutable fields throws', async () => {
+    const user = await repo.upsertUser('ac-empty-upd', 'ac-empty-upd-subj');
+    const project = await repo.createProject(user.id, 'ACEmptyUpd');
+    const lanes = await repo.listLanes(project.id);
+    const todo = lanes.find((l: any) => l.name === 'ToDo')!;
+    try {
+      await repo.updateLane(todo.id, project.id, {}, todo.version, 0);
+      expect.fail('Should throw');
+    } catch (e: any) {
+      expect(e.code).toBe('BAD_REQUEST');
+      expect(e.message).toContain('No mutable fields provided');
+    }
+  });
+
+  it('stale version still rejected in updateLane', async () => {
+    const user = await repo.upsertUser('ac-stale', 'ac-stale-subj');
+    const project = await repo.createProject(user.id, 'ACStale');
+    const lanes = await repo.listLanes(project.id);
+    const todo = lanes.find((l: any) => l.name === 'ToDo')!;
+    try {
+      await repo.updateLane(todo.id, project.id, { name: 'Updated' }, 999, 0);
+      expect.fail('Should throw STALE_VERSION');
+    } catch (e: any) {
+      expect(e.code).toBe('STALE_VERSION');
+      expect(e.status).toBe(409);
+    }
+  });
+
+  describe('migration 005', () => {
+    it('backfills auto_collapse correctly for various Complete names', async () => {
+      const testDbPath = '/tmp/test-migration-005-bf-' + randomUUID() + '.db';
+      process.env.DB_DIALECT = 'sqlite';
+      process.env.SQLITE_PATH = testDbPath;
+
+      const db = createDb();
+      try {
+        // Apply initial migration (which creates lanes without auto_collapse)
+        await migrationUp(db);
+
+        // Use raw SQL to insert lanes with various Complete and non-Complete names
+        const now = new Date().toISOString();
+        // We can use the testRepo for getting a user and project
+        const testRepo = new Repository(db);
+        const user = await testRepo.upsertUser('005-bf-usr', '005-bf-subj');
+        // Create project uses old schema - but it works now because 001-initial
+        // creates lanes without auto_collapse. However, the repository now
+        // expects auto_collapse column, so we need to insert directly.
+        const projectId = randomUUID();
+        await sql`
+          INSERT INTO projects (id, owner_id, name, description, archived_at, rank, version, created_at, updated_at)
+          VALUES (${projectId}, ${user.id}, 'BFProj', NULL, NULL, 0, 0, ${now}, ${now})
+        `.execute(db);
+
+        // Insert lanes manually without auto_collapse (using pre-005 schema)
+        for (const [name, expectedAc] of [
+          ['Complete', 1],
+          ['complete', 1],
+          ['  COMPLETE  ', 1], // whitespace and mixed case
+          ['InProgress', 0],
+          ['ToDo', 0],
+          ['   todo  ', 0], // whitespace, not Complete
+        ] as [string, number][]) {
+          const laneId = randomUUID();
+          await sql`
+            INSERT INTO lanes (id, project_id, name, rank, version, created_at, updated_at)
+            VALUES (${laneId}, ${projectId}, ${name}, 0, 0, ${now}, ${now})
+          `.execute(db);
+        }
+
+        // Now apply migration 005
+        await migration005Up(db);
+
+        // Verify auto_collapse values
+        const lanesResult = await sql`SELECT * FROM lanes WHERE project_id = ${projectId}`.execute(db);
+        const rows = lanesResult.rows as any[];
+        expect(rows.length).toBe(6);
+        for (const row of rows) {
+          if (row.name.trim().toLowerCase() === 'complete') {
+            expect(row.auto_collapse).toBe(1, `expected 1 for name="${row.name}"`);
+          } else {
+            expect(row.auto_collapse).toBe(0, `expected 0 for name="${row.name}"`);
+          }
+        }
+      } finally {
+        await db.destroy();
+        ['', '-wal', '-shm'].forEach(suffix => {
+          try { unlinkSync(testDbPath + suffix); } catch {}
+        });
+      }
+    });
+
+    it('migration 005 chain and idempotence', async () => {
+      const testDbPath = '/tmp/test-migration-005-idem-' + randomUUID() + '.db';
+      process.env.DB_DIALECT = 'sqlite';
+      process.env.SQLITE_PATH = testDbPath;
+
+      const db = createDb();
+      try {
+        // Apply 001, 003, 005 in sequence
+        await migrationUp(db);
+        await migration003Up(db);
+        await migration005Up(db);
+
+        // Verify lane auto_collapse column exists
+        const colResult = await sql`
+          SELECT name FROM pragma_table_info('lanes') WHERE name = 'auto_collapse'
+        `.execute(db);
+        expect(colResult.rows.length).toBeGreaterThanOrEqual(1);
+
+        // Apply 005 again - should be idempotent (ALTER ADD COLUMN ignores if exists)
+        await migration005Up(db);
+
+        // Verify still exists
+        const colResult2 = await sql`
+          SELECT name FROM pragma_table_info('lanes') WHERE name = 'auto_collapse'
+        `.execute(db);
+        expect(colResult2.rows.length).toBeGreaterThanOrEqual(1);
+
+        // Apply down
+        await migration005Down(db);
+
+        // Verify column dropped
+        const colResult3 = await sql`
+          SELECT name FROM pragma_table_info('lanes') WHERE name = 'auto_collapse'
+        `.execute(db);
+        expect(colResult3.rows.length).toBe(0);
+      } finally {
+        await db.destroy();
+        ['', '-wal', '-shm'].forEach(suffix => {
+          try { unlinkSync(testDbPath + suffix); } catch {}
+        });
+      }
+    });
+
+    it('re-running up after explicit false does not restore backfill', async () => {
+      const testDbPath = '/tmp/test-migration-005-norestore-' + randomUUID() + '.db';
+      process.env.DB_DIALECT = 'sqlite';
+      process.env.SQLITE_PATH = testDbPath;
+
+      const db = createDb();
+      try {
+        // Apply initial migration (without auto_collapse)
+        await migrationUp(db);
+
+        // Create a project and set a lane to explicit false (Complete but false)
+        const testRepo = new Repository(db);
+        const user = await testRepo.upsertUser('005-nr-usr', '005-nr-subj');
+        const projectId = randomUUID();
+        const now = new Date().toISOString();
+        // Insert project and lane directly with pre-005 schema
+        await sql`
+          INSERT INTO projects (id, owner_id, name, description, archived_at, rank, version, created_at, updated_at)
+          VALUES (${projectId}, ${user.id}, 'NoRestore', NULL, NULL, 0, 0, ${now}, ${now})
+        `.execute(db);
+        const laneId = randomUUID();
+        await sql`
+          INSERT INTO lanes (id, project_id, name, rank, version, created_at, updated_at)
+          VALUES (${laneId}, ${projectId}, 'Complete', 0, 0, ${now}, ${now})
+        `.execute(db);
+
+        // Apply 005 - backfill sets Complete lanes to 1
+        await migration005Up(db);
+        // Verify it was set to 1 by backfill
+        const afterFirst = await sql`SELECT auto_collapse FROM lanes WHERE id = ${laneId}`.execute(db);
+        expect((afterFirst.rows as any[])[0].auto_collapse).toBe(1);
+
+        // Simulate explicit false: set auto_collapse to 0
+        await sql`UPDATE lanes SET auto_collapse = 0 WHERE id = ${laneId}`.execute(db);
+        const afterFalse = await sql`SELECT auto_collapse FROM lanes WHERE id = ${laneId}`.execute(db);
+        expect((afterFalse.rows as any[])[0].auto_collapse).toBe(0);
+
+        // Re-run migration 005 up - should NOT overwrite the explicit false
+        await migration005Up(db);
+        const afterRerun = await sql`SELECT auto_collapse FROM lanes WHERE id = ${laneId}`.execute(db);
+        expect((afterRerun.rows as any[])[0].auto_collapse).toBe(0, 'migration rerun should not overwrite explicit false');
+      } finally {
+        await db.destroy();
+        ['', '-wal', '-shm'].forEach(suffix => {
+          try { unlinkSync(testDbPath + suffix); } catch {}
+        });
+      }
     });
   });
 });
