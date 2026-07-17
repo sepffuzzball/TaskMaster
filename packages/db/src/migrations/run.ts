@@ -13,6 +13,7 @@ import { createDb } from '../db.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { Kysely } from 'kysely';
 
 /**
  * Custom MigrationProvider that filters filenames matching numeric migration
@@ -48,6 +49,38 @@ export class NumericFileMigrationProvider {
 
     return migrations;
   }
+}
+
+/**
+ * Reusable migration function that runs migrations against the given DB handle
+ * using the NumericFileMigrationProvider from an optionally provided folder.
+ */
+export async function migrateToLatest(
+  db: Kysely<any>,
+  migrationsFolder?: string,
+): Promise<{ results?: { status: string; migrationName: string; direction: string }[]; error?: unknown }> {
+  // Determine the migrations directory
+  let migrationsDir: string;
+  if (migrationsFolder) {
+    migrationsDir = migrationsFolder;
+  } else {
+    const dirname = fileURLToPath(new URL('.', import.meta.url));
+    migrationsDir = path.resolve(dirname, '.'); // Same directory as this file (compiled)
+  }
+
+  const migrator = new Migrator({
+    db,
+    provider: new NumericFileMigrationProvider(migrationsDir),
+  });
+
+  const result = await migrator.migrateToLatest();
+
+  // Make failures fatal: throw the underlying error when present
+  if (result.error) {
+    throw result.error;
+  }
+
+  return result;
 }
 
 export async function run(): Promise<void> {

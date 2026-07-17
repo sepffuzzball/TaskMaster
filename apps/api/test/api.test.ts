@@ -1,10 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildApp } from '../src/index.js';
-import { Repository, createDb } from '@taskmaster/db';
+import { Repository, createDb, migrateToLatest } from '@taskmaster/db';
 import { sql } from 'kysely';
 import * as shared from '@taskmaster/shared';
 import { randomUUID, randomBytes } from 'crypto';
 import { buildCanonicalCallbackUrl } from '../src/routes/auth.js';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { unlinkSync } from 'node:fs';
 
 let app: any;
 let repo: Repository;
@@ -36,18 +39,10 @@ function setTestEnv() {
 describe('API behavior tests', () => {
   beforeAll(async () => {
     setTestEnv();
-    // Run migrations on test DB - use the migration module
-    const db = createDb();
-    // Run the migration using the real migration files
-    const migration001 = await import('@taskmaster/db/migrations/001-initial');
-    await migration001.up(db as any);
-    const migration002 = await import('@taskmaster/db/migrations/002-oidc-transactions');
-    await migration002.up(db as any);
-    const migration003 = await import('@taskmaster/db/migrations/003-task-tags');
-    await migration003.up(db as any);
+    // buildApp now automatically runs migrations (including 003-task-tags)
     app = await buildApp();
     await app.ready();
-    repo = new Repository(db);
+    repo = new Repository(app.db);
 
     // Create dev-bypass user for auth bypass
     await repo.upsertUser('dev-bypass-issuer', 'dev-bypass');
@@ -55,6 +50,7 @@ describe('API behavior tests', () => {
 
   afterAll(async () => {
     await app.close();
+    // app.close() already destroys the DB handle via onClose hook
   });
 
   // Health endpoint
@@ -1021,6 +1017,123 @@ describe('API behavior tests', () => {
       expect(consumed2).toBeNull();
 
       await db2.destroy();
+    });
+  });
+
+  // --- Regression test: startup migration automatically applies 003 ---
+
+  describe('Startup migration fix', () => {
+    it('auto-applies 003-task-tags when missing on startup', async () => {
+      const regressionDbPath = '/tmp/test-taskmaster-regression-' + randomUUID() + '.db';
+      const savedEnv = {
+        DB_DIALECT: process.env.DB_DIALECT,
+        SQLITE_PATH: process.env.SQLITE_PATH,
+        NODE_ENV: process.env.NODE_ENV,
+        APP_ORIGIN: process.env.APP_ORIGIN,
+        OIDC_ISSUER: process.env.OIDC_ISSUER,
+        OIDC_CLIENT_ID: process.env.OIDC_CLIENT_ID,
+        OIDC_CLIENT_SECRET: process.env.OIDC_CLIENT_SECRET,
+        OIDC_REDIRECT_URI: process.env.OIDC_REDIRECT_URI,
+        DEV_AUTH_BYPASS: process.env.DEV_AUTH_BYPASS,
+        OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+        SESSION_SECRET: process.env.SESSION_SECRET,
+      };
+
+      process.env.DB_DIALECT = 'sqlite';
+      process.env.SQLITE_PATH = regressionDbPath;
+
+      let regressionDb: any;
+      let regressionRepo: Repository;
+      let regressionApp: any;
+
+      try {
+        // Create a fresh DB and apply migrations via Migrator up to 002 only
+        const { createDb: createDb2, migrateToLatest: migrateToLatest2, Repository: Repo2 } = await import('@taskmaster/db');
+        regressionDb = createDb2();
+
+        const { Migrator } = await import('kysely/migration');
+        const { NumericFileMigrationProvider } = await import('@taskmaster/db/migrations/run');
+        const migrationsDir = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', '..', 'packages/db/dist/migrations');
+        const migrator = new Migrator({
+          db: regressionDb,
+          provider: new NumericFileMigrationProvider(migrationsDir),
+        });
+
+        // Apply only 001 and 002 using migrateTo
+        await migrator.migrateTo('002-oidc-transactions');
+
+        // Verify 003 is not yet applied - tags/task_tags should not exist
+        regressionRepo = new Repo2(regressionDb);
+
+        // Explicitly prove tags/task_tags are absent
+        try {
+          await regressionRepo.listTags('any-id');
+          // If no error, tags table exists - that means 003 was already applied, which is wrong
+          expect.fail('Expected tags table NOT to exist before startup');
+        } catch (_e: any) {
+          // Expected error since tags table doesn't exist yet
+        }
+        try {
+          await regressionRepo.createTag('test-user', 'test-tag');
+          // If no error, tags table exists - wrong
+          expect.fail('Expected createTag to fail (no tags table)');
+        } catch (_e: any) {
+          // Expected: table 'tags' does not exist or other schema error
+        }
+
+        // Now buildApp with this DB - should auto-apply 003
+        // extract path so buildApp uses the same DB
+        regressionApp = await buildApp();
+        await regressionApp.ready();
+
+        // Verify 003 is now applied - tags/task_tags operations should work
+        // First, create a user in the regression DB so FK constraints work
+        const regressionUser = await regressionRepo.upsertUser('regression-issuer', 'regression-subject');
+        const regressionUserId = regressionUser.id;
+        const tags = await regressionRepo.listTags(regressionUserId);
+        expect(tags).toBeDefined();
+        expect(Array.isArray(tags)).toBe(true);
+        // Create a tag and verify it works
+        const tag = await regressionRepo.createTag(regressionUserId, 'regression-tag');
+        expect(tag).toBeDefined();
+        expect(tag.name).toBe('regression-tag');
+        // Clean up tag
+        await regressionRepo.deleteTag(tag.id, regressionUserId, tag.version);
+        // Verify task creation with tagNames works
+        const project = await regressionRepo.createProject(regressionUserId, 'Regression Proj');
+        const lanes = await regressionRepo.listLanes(project.id);
+        const task = await regressionRepo.createTask(project.id, lanes[0].id, 'Regression task with tags', undefined, undefined, ['regression-tag']);
+        // Fetch the task to verify tags are returned
+        const taskWithTags = await regressionRepo.getTaskById(task.id);
+        expect(taskWithTags).toBeDefined();
+        expect(taskWithTags!.tags).toBeDefined();
+        expect(taskWithTags!.tags.length).toBeGreaterThanOrEqual(1);
+        // Clean up task
+        await regressionRepo.deleteTask(task.id);
+      } finally {
+        if (regressionApp) {
+          await regressionApp.close();
+        }
+        if (regressionDb) {
+          await regressionDb.destroy();
+        }
+        // Restore original env vars
+        process.env.DB_DIALECT = savedEnv.DB_DIALECT;
+        process.env.SQLITE_PATH = savedEnv.SQLITE_PATH;
+        process.env.NODE_ENV = savedEnv.NODE_ENV;
+        process.env.APP_ORIGIN = savedEnv.APP_ORIGIN;
+        process.env.OIDC_ISSUER = savedEnv.OIDC_ISSUER;
+        process.env.OIDC_CLIENT_ID = savedEnv.OIDC_CLIENT_ID;
+        process.env.OIDC_CLIENT_SECRET = savedEnv.OIDC_CLIENT_SECRET;
+        process.env.OIDC_REDIRECT_URI = savedEnv.OIDC_REDIRECT_URI;
+        process.env.DEV_AUTH_BYPASS = savedEnv.DEV_AUTH_BYPASS;
+        process.env.OPENAI_API_KEY = savedEnv.OPENAI_API_KEY;
+        process.env.SESSION_SECRET = savedEnv.SESSION_SECRET;
+        // Clean up temp files
+        ['', '-wal', '-shm'].forEach(suffix => {
+          try { unlinkSync(regressionDbPath + suffix); } catch {}
+        });
+      }
     });
   });
 

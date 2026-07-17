@@ -1,7 +1,7 @@
 import { fastify } from 'fastify';
 import fastifyPlugin from 'fastify-plugin';
 import { parseEnv } from './config.js';
-import { Repository, createDb } from '@taskmaster/db';
+import { Repository, createDb, migrateToLatest } from '@taskmaster/db';
 import { Services } from './services/index.js';
 import { authPlugin } from './plugins/auth.js';
 import { errorHandlerPlugin } from './plugins/error-handler.js';
@@ -35,6 +35,15 @@ declare module '@fastify/cookie' {
 async function buildApp() {
   const env = parseEnv();
   const db = createDb();
+
+  // Run migrations before building services/routes to ensure latest schema
+  try {
+    await migrateToLatest(db);
+  } catch (err) {
+    await db.destroy();
+    throw err;
+  }
+
   const repo = new Repository(db);
   const services = new Services(repo);
 
@@ -91,9 +100,12 @@ async function buildApp() {
     },
   });
 
-  // Graceful shutdown
+  // Graceful shutdown: destroy DB exactly once on normal close
   app.addHook('onClose', async (instance) => {
     instance.log.info('Shutting down...');
+    if (instance.db && typeof instance.db.destroy === 'function') {
+      await instance.db.destroy();
+    }
   });
 
   return app;
