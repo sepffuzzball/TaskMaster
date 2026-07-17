@@ -28,6 +28,15 @@ export type Lane = {
   updatedAt: string;
 };
 
+export type Tag = {
+  id: string;
+  name: string;
+  color: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type Task = {
   id: string;
   projectId: string;
@@ -36,6 +45,7 @@ export type Task = {
   description?: string;
   rank: number;
   version: number;
+  tags: Tag[];
   createdAt: string;
   updatedAt: string;
 };

@@ -34,11 +34,13 @@ import {
   Menu,
   FolderPlus,
   PanelRightClose,
+  Search,
 } from 'lucide-react';
 import SettingsDialog from './components/SettingsDialog';
 import MoveToNewProjectDialog from './components/MoveToNewProjectDialog';
 import TaskCard from './components/TaskCard';
 import LaneCard, { type LaneDropEdge } from './components/LaneCard';
+import TagInput from './components/TagInput';
 
 // ===== Theme persistence =====
 const THEME_STORAGE_KEY = 'taskmaster-theme';
@@ -516,6 +518,7 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [showSettings, setShowSettings] = useState(false);
+  const [taskSearch, setTaskSearch] = useState('');
 
   const projectsQuery = useQuery({
     queryKey: ['projects'],
@@ -599,14 +602,20 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
   const activeProjects = projectsQuery.data?.filter((p: Project) => !p.archivedAt).sort((a: Project, b: Project) => a.rank - b.rank) || [];
   const archivedProjects = projectsQuery.data?.filter((p: Project) => !!p.archivedAt) || [];
 
+  const normalizedSearch = taskSearch.trim().toLowerCase();
+  const visibleTasks = React.useMemo(() => {
+    const allTasks = tasksQuery.data || [];
+    if (!normalizedSearch) return allTasks;
+    return allTasks.filter((task: Task) => task.title.toLowerCase().includes(normalizedSearch) || task.tags?.some(tag => tag.name.toLowerCase().includes(normalizedSearch)));
+  }, [normalizedSearch, tasksQuery.data]);
   const tasksByLane = useCallback(
-    (laneId: string) => tasksQuery.data?.filter((t: Task) => t.laneId === laneId).sort((a: Task, b: Task) => a.rank - b.rank) || [],
-    [tasksQuery.data]
+    (laneId: string) => visibleTasks.filter((task: Task) => task.laneId === laneId).sort((a: Task, b: Task) => a.rank - b.rank),
+    [visibleTasks]
   );
 
   const keyboardCoordinates = React.useMemo(
-    () => createKeyboardCoordinateGetter({ lanes: lanesQuery.data || [], tasks: tasksQuery.data || [] }),
-    [lanesQuery.data, tasksQuery.data]
+    () => createKeyboardCoordinateGetter({ lanes: lanesQuery.data || [], tasks: visibleTasks }),
+    [lanesQuery.data, visibleTasks]
   );
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -675,10 +684,15 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
     setLaneReorderEdge('none');
   }, []);
 
+  useEffect(() => {
+    if (normalizedSearch && activeDraggedTask) clearDragState();
+  }, [normalizedSearch, activeDraggedTask, clearDragState]);
+
   // ===== Drag handlers =====
   const onDragStart = (event: DragStartEvent) => {
     const type = event.active.data.current?.type;
     if (type === 'task') {
+      if (normalizedSearch) return;
       const t = tasksQuery.data?.find((x: Task) => x.id === event.active.id) || null;
       setActiveDraggedTask(t);
       // Dragging never changes navigation state. Mobile gets a compact shelf.
@@ -767,6 +781,7 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
 
     try {
       if (activeType === 'task') {
+        if (normalizedSearch) return;
         handleTaskDragEnd(activeId, overId, event.over?.data.current);
       } else if (activeType === 'lane') {
         handleLaneDragEnd(activeId, overId, overType);
@@ -1014,6 +1029,13 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
                 {project.description && <span className="board-subtitle">{project.description}</span>}
               </div>
               <div className="board-header-controls">
+                <div className="board-search">
+                  <Search size={16} aria-hidden="true" />
+                  <label className="sr-only" htmlFor="task-search">Search tasks by title or tag</label>
+                  <input id="task-search" type="search" value={taskSearch} onChange={event => setTaskSearch(event.target.value)} placeholder="Search tasks or tags" />
+                  {taskSearch && <button type="button" className="btn-icon board-search-clear" onClick={() => setTaskSearch('')} aria-label="Clear task search"><X size={15} /></button>}
+                </div>
+                <span className="sr-only" aria-live="polite">{normalizedSearch ? `${visibleTasks.length} ${visibleTasks.length === 1 ? 'task' : 'tasks'} found` : `${visibleTasks.length} tasks total`}</span>
                 <button className="btn btn-secondary btn-small" onClick={() => {
                   const newName = prompt('New name');
                   if (newName) updateProjectMut.mutate({ name: newName, expectedVersion: project.version });
@@ -1090,11 +1112,13 @@ function BoardContent({ projectId, sidebarOpen, onCloseSidebar }: {
                   onDeleteTask={(taskId: string) => setShowingDeleteTask(taskId)}
                   taskOverTaskId={taskDragActive ? overTaskId : null}
                   wholeLaneTarget={taskDragActive && wholeLaneTargetId === lane.id}
-                  laneDropEdge={!taskDragActive && activeDraggedLane && laneReorderLaneId === lane.id ? laneReorderEdge : 'none'}
-                  hasTaskActive={taskDragActive}
-                />
+                   laneDropEdge={!taskDragActive && activeDraggedLane && laneReorderLaneId === lane.id ? laneReorderEdge : 'none'}
+                   hasTaskActive={taskDragActive}
+                   taskDragDisabled={!!normalizedSearch}
+                 />
               ))}
               {(!lanesQuery.data || lanesQuery.data.length === 0) && <div className="empty-state">No lanes yet</div>}
+              {!!normalizedSearch && visibleTasks.length === 0 && lanesQuery.data.length > 0 && <div className="board-no-matches" role="status">No tasks match "{taskSearch.trim()}". Try a title or tag name.</div>}
             </div>
           )}
           {!isArchived && !lanesQuery.error && !lanesQuery.isLoading && !lanesQuery.data && (
@@ -1171,9 +1195,12 @@ function AddTaskDialog({ laneId, projectId, onClose, onCreated }: {
 }) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [tagNames, setTagNames] = useState<string[]>([]);
+  const queryClient = useQueryClient();
+  const tagsQuery = useQuery({ queryKey: ['tags'], queryFn: () => api.tags.list() });
   const createMut = useMutation({
-    mutationFn: (data: { title: string; description?: string }) => api.tasks.create(projectId, laneId, data),
-    onSuccess: () => { triggerToast('Task created', 'success'); onCreated(); },
+    mutationFn: (data: { title: string; description?: string; tagNames: string[] }) => api.tasks.create(projectId, laneId, data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['tags'] }); queryClient.invalidateQueries({ queryKey: ['tasks', projectId] }); triggerToast('Task created', 'success'); onCreated(); },
     onError: (e: any) => triggerToast(e.errors?.[0]?.message || 'Failed to create task', 'danger'),
   });
 
@@ -1191,11 +1218,12 @@ function AddTaskDialog({ laneId, projectId, onClose, onCreated }: {
       <div className="dialog" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="add-task-title">
         <button className="dialog-close btn-icon" onClick={onClose} aria-label="Close dialog"><X size={20} /></button>
         <h2 className="dialog-title" id="add-task-title">Add Task</h2>
-        <form className="dialog-form" onSubmit={e => { e.preventDefault(); createMut.mutate({ title, description }); }}>
+        <form className="dialog-form" onSubmit={e => { e.preventDefault(); createMut.mutate({ title, description, tagNames }); }}>
           <div className="form-field">
             <label htmlFor="task-title">Title</label>
             <input id="task-title" value={title} onChange={e => setTitle(e.target.value)} required maxLength={200} />
           </div>
+          <TagInput value={tagNames} availableTags={tagsQuery.data || []} onChange={setTagNames} />
           <div className="form-field">
             <label htmlFor="task-description">Description (optional)</label>
             <textarea id="task-description" value={description} onChange={e => setDescription(e.target.value)} maxLength={1000} rows={3} />
@@ -1220,9 +1248,12 @@ function EditTaskDialog({ taskId, projectId, onClose, onUpdated }: {
   const taskQuery = useQuery({ queryKey: ['task', taskId], queryFn: () => api.tasks.get(projectId, taskId) });
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [tagNames, setTagNames] = useState<string[]>([]);
+  const queryClient = useQueryClient();
+  const tagsQuery = useQuery({ queryKey: ['tags'], queryFn: () => api.tags.list() });
   const updateMut = useMutation({
-    mutationFn: (data: { title?: string; description?: string; expectedVersion: number }) => api.tasks.update(projectId, taskId, data),
-    onSuccess: () => { triggerToast('Task updated', 'success'); onUpdated(); },
+    mutationFn: (data: { title?: string; description?: string; tagNames: string[]; expectedVersion: number }) => api.tasks.update(projectId, taskId, data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['tags'] }); queryClient.invalidateQueries({ queryKey: ['tasks', projectId] }); queryClient.invalidateQueries({ queryKey: ['task', taskId] }); triggerToast('Task updated', 'success'); onUpdated(); },
     onError: (e: any) => triggerToast(e.errors?.[0]?.message || 'Failed to update', 'danger'),
   });
 
@@ -1255,6 +1286,7 @@ function EditTaskDialog({ taskId, projectId, onClose, onUpdated }: {
     if (taskQuery.data) {
       setTitle(taskQuery.data.title ?? '');
       setDescription(taskQuery.data.description ?? '');
+      setTagNames((taskQuery.data.tags || []).map(tag => tag.name));
     }
   }, [taskQuery.data]);
 
@@ -1344,7 +1376,7 @@ function EditTaskDialog({ taskId, projectId, onClose, onUpdated }: {
               className="dialog-form"
               onSubmit={e => {
                 e.preventDefault();
-                updateMut.mutate({ title, description, expectedVersion: taskQuery.data?.version ?? 0 });
+                updateMut.mutate({ title, description, tagNames, expectedVersion: taskQuery.data?.version ?? 0 });
               }}
             >
               <div className="form-field">
@@ -1368,6 +1400,7 @@ function EditTaskDialog({ taskId, projectId, onClose, onUpdated }: {
                   rows={6}
                 />
               </div>
+              <TagInput value={tagNames} availableTags={tagsQuery.data || []} onChange={setTagNames} />
             </form>
           )}
         </div>

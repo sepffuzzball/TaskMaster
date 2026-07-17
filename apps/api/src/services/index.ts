@@ -146,8 +146,11 @@ export class Services {
     if (!lane || lane.project_id !== projectId) {
       throw new ApiError(404, 'NOT_FOUND', 'Lane not found in project');
     }
-    const row = await this.repo.createTask(projectId, laneId, parsed.title, parsed.description);
-    return this.mapTask(row);
+    const row = await this.repo.createTask(projectId, laneId, parsed.title, parsed.description, undefined, parsed.tagNames);
+    // Fetch full task with tags since createTask does not return tags
+    const taskWithTags = await this.repo.getTaskById(row.id);
+    if (!taskWithTags) throw new ApiError(500, 'INTERNAL_ERROR');
+    return this.mapTask(taskWithTags);
   }
 
   async listTasks(projectId: string, laneId?: string, ownerId?: string) {
@@ -175,7 +178,7 @@ export class Services {
     const project = await this.repo.getProjectById(task.project_id);
     if (!project || project.owner_id !== ownerId) throw new ApiError(404, 'NOT_FOUND');
     if (project.archived_at) throw new ApiError(400, 'BAD_REQUEST', 'Cannot update task in archived project');
-    const row = await this.repo.updateTask(taskId, parsed.title, parsed.description, parsed.expectedVersion);
+    const row = await this.repo.updateTask(taskId, parsed.title, parsed.description, parsed.tagNames, parsed.expectedVersion);
     return this.mapTask(row);
   }
 
@@ -347,6 +350,35 @@ export class Services {
     return validated;
   }
 
+  // --- Tag operations (owner-scoped) ---
+
+  async listTags(ownerId: string) {
+    const rows = await this.repo.listTags(ownerId);
+    return rows.map(this.mapTag);
+  }
+
+  async getTagById(tagId: string, ownerId: string) {
+    const row = await this.repo.getTagById(tagId);
+    if (!row || row.user_id !== ownerId) {
+      return { error: 404, code: 'NOT_FOUND' };
+    }
+    return { value: this.mapTag(row) };
+  }
+
+  async updateTag(tagId: string, input: shared.UpdateTagInput, ownerId: string) {
+    const parsed = shared.UpdateTagInput.parse(input);
+    const row = await this.repo.updateTag(tagId, parsed.name ?? '', parsed.color ?? '', ownerId, parsed.expectedVersion);
+    return this.mapTag(row);
+  }
+
+  async deleteTag(tagId: string, expectedVersion: number | undefined, ownerId: string) {
+    if (expectedVersion === undefined || expectedVersion === null) {
+      throw new ApiError(400, 'BAD_REQUEST', 'expectedVersion required');
+    }
+    await this.repo.deleteTag(tagId, ownerId, expectedVersion);
+    return { success: true };
+  }
+
   // --- Token-based authentication ---
 
   async authenticateApiToken(prefix: string, token: string): Promise<{ ownerId: string; scopes: string[] } | null> {
@@ -405,6 +437,7 @@ export class Services {
       description: row.description || undefined,
       rank: row.rank,
       version: row.version,
+      tags: row.tags ? row.tags.map((t: any) => this.mapTag(t)) : [],
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -420,6 +453,17 @@ export class Services {
       expiresAt: row.expires_at || undefined,
       revokedAt: row.revoked_at || undefined,
       lastUsedAt: row.last_used_at || undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private mapTag(row: any): shared.Tag {
+    return {
+      id: row.id,
+      name: row.name,
+      color: row.color,
+      version: row.version,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

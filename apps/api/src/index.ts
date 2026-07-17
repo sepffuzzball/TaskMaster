@@ -12,6 +12,7 @@ import { registerLaneRoutes } from './routes/lanes.js';
 import { registerTaskRoutes } from './routes/tasks.js';
 import { registerAiRoutes } from './routes/ai.js';
 import { registerTokenRoutes } from './routes/tokens.js';
+import { registerTagRoutes } from './routes/tags.js';
 import { registerMcpRoutes } from './routes/mcp.js';
 import type { FastifyInstance } from 'fastify';
 import { randomBytes } from 'crypto';
@@ -71,6 +72,7 @@ async function buildApp() {
   await app.register((child) => registerAiRoutes(child as any), { prefix: '/api/v1' });
   await app.register((child) => registerTokenRoutes(child as any), { prefix: '/api/v1' });
   await app.register((child) => registerMcpRoutes(child as any), { prefix: '/mcp' });
+  await app.register((child) => registerTagRoutes(child as any), { prefix: '/api/v1'});
 
   // OpenAPI metadata
   app.addSchema({

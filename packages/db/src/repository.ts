@@ -67,6 +67,41 @@ export interface ApiTokenRow {
   updated_at: string;
 }
 
+export interface TagRow {
+  id: string;
+  user_id: string;
+  name: string;
+  normalized_name: string;
+  color: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskTagRow {
+  task_id: string;
+  tag_id: string;
+  created_at: string;
+}
+
+// --- Color palette for tags based on normalized name ---
+const TAG_COLORS = [
+  '#E53E3E', '#DD6B20', '#D69F2E', '#38A16C', '#3182CE', '#805AD5', '#DD45B8',
+  '#F56565', '#ED8930', '#D69B2D', '#48A771', '#2979C8', '#6B5DBB', '#B251B6',
+  '#E65164', '#D17A34', '#BFA12D', '#3D8C5A', '#2467B3', '#5D4BA8', '#AD3B9A',
+  '#F46565', '#DE7A36', '#C7A52F', '#3E8250', '#2560AD', '#5849A6',
+];
+
+function tagColorFromName(normalizedName: string): string {
+  let hash = 0;
+  for (let i = 0; i < normalizedName.length; i++) {
+    hash = ((hash << 5) - hash) + normalizedName.charCodeAt(i);
+    hash = hash & 0xFFFFFFFF;
+  }
+  const index = Math.abs(hash) % TAG_COLORS.length;
+  return TAG_COLORS[index];
+}
+
 // --- Default lane spec ---
 const DEFAULT_LANES_SPEC = [
   { name: 'ToDo', rank: 0 },
@@ -499,7 +534,7 @@ export class Repository {
   // --- Task ops ---
 
   async createTask(
-    projectId: string, laneId: string, title: string, description?: string, rank?: number,
+    projectId: string, laneId: string, title: string, description?: string, rank?: number, tagNames?: string[],
   ): Promise<TaskRow> {
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -507,51 +542,93 @@ export class Repository {
     const project = await this.getProjectById(projectId);
     if (!project) throw new ApiError(404, 'NOT_FOUND');
     if (project.archived_at) throw new ApiError(400, 'BAD_REQUEST', 'Cannot create task in archived project');
-    await sql`
-      INSERT INTO tasks (id, project_id, lane_id, title, description, rank, version, created_at, updated_at)
-      VALUES (${id}, ${projectId}, ${laneId}, ${title}, ${description || null}, ${actualRank}, 0, ${now}, ${now})
-    `.execute(this.db);
-    return {
-      id, project_id: projectId, lane_id: laneId, title, description: description || null,
-      rank: actualRank, version: 0, created_at: now, updated_at: now,
-    };
+      return this.transaction(async (trx) => {
+        await sql`
+          INSERT INTO tasks (id, project_id, lane_id, title, description, rank, version, created_at, updated_at)
+          VALUES (${id}, ${projectId}, ${laneId}, ${title}, ${description || null}, ${actualRank}, 0, ${now}, ${now})
+        `.execute(trx as any);
+        if (tagNames && tagNames.length > 0) {
+          const tagIds = await this.resolveOrCreateTags(project.owner_id, tagNames, trx as any);
+          await this.setTaskTags(id, tagIds, trx as any);
+        }
+        // Hydrate tags before returning
+        const tags = tagNames && tagNames.length > 0
+          ? await this.getTaskTags(id, trx as any)
+          : [] as TagRow[];
+        return {
+          id, project_id: projectId, lane_id: laneId, title, description: description || null,
+          rank: actualRank, version: 0, created_at: now, updated_at: now,
+          tags,
+        };
+      });
+    }
+
+  async getTaskById(taskId: string): Promise<(TaskRow & { tags: TagRow[] }) | null> {
+    const row = await this.getTaskRowById(taskId);
+    if (!row) return null;
+    const tags = await this.getTaskTags(taskId);
+    return { ...row, tags };
   }
 
-  async getTaskById(taskId: string): Promise<TaskRow | null> {
+  // Internal method to get raw TaskRow
+  private async getTaskRowById(taskId: string): Promise<TaskRow | null> {
     const result = await sql`SELECT * FROM tasks WHERE id = ${taskId}`.execute(this.db);
     const rows = result.rows as any[];
     return rows?.[0] || null;
   }
 
-  async listTasks(projectId: string, laneId?: string): Promise<TaskRow[]> {
-    let query = sql`SELECT * FROM tasks WHERE project_id = ${projectId}`;
-    if (laneId) query = sql`${query} AND lane_id = ${laneId}`;
-    query = sql`${query} ORDER BY rank ASC`;
-    const result = await query.execute(this.db);
-    return result.rows as any[] as TaskRow[];
+  async listTasks(projectId: string, laneId?: string): Promise<(TaskRow & { tags: TagRow[] })[]> {
+    const result = await sql`
+      SELECT * FROM tasks WHERE project_id = ${projectId}${laneId ? sql` AND lane_id = ${laneId}` : sql``} ORDER BY rank ASC
+    `.execute(this.db);
+    const tasks = result.rows as any[] as TaskRow[];
+    return this.hydrateTaskTags(tasks);
   }
 
   async updateTask(
-    taskId: string, title?: string, description?: string, expectedVersion?: number,
-  ): Promise<TaskRow> {
-    const task = await this.getTaskById(taskId);
-    if (!task) throw new ApiError(404, 'NOT_FOUND');
+    taskId: string, title?: string, description?: string, tagNames?: string[], expectedVersion?: number,
+  ): Promise<(TaskRow & { tags: TagRow[] })> {
+    const taskRow = await this.getTaskRowById(taskId);
+    if (!taskRow) throw new ApiError(404, 'NOT_FOUND');
     // If expectedVersion is provided, check it
-    if (expectedVersion !== undefined && task.version !== expectedVersion) throw new ApiError(409, 'STALE_VERSION');
+    if (expectedVersion !== undefined && taskRow.version !== expectedVersion) throw new ApiError(409, 'STALE_VERSION');
     const now = new Date().toISOString();
-    const newTitle = title ?? task.title;
-    const newDesc = description !== undefined ? description : task.description;
-    const result = await sql`
-      UPDATE tasks SET title = ${newTitle}, description = ${newDesc}, updated_at = ${now}, version = version + 1
-      WHERE id = ${taskId}${expectedVersion !== undefined ? sql` AND version = ${expectedVersion}` : sql``}
-    `.execute(this.db);
-    const numUpdated = (result as any).numUpdatedRows ?? (result as any).numAffectedRows ?? 0n;
-    if (typeof numUpdated === 'bigint' && numUpdated === ZERO) {
-      throw new ApiError(409, 'STALE_VERSION');
-    }
-    const updated = await this.getTaskById(taskId);
-    if (!updated) throw new ApiError(404, 'NOT_FOUND');
-    return updated;
+    const newTitle = title ?? taskRow.title;
+    const newDesc = description !== undefined ? description : taskRow.description;
+    return this.transaction(async (trx) => {
+      // Update task fields
+      const result = await sql`
+        UPDATE tasks SET title = ${newTitle}, description = ${newDesc}, updated_at = ${now}, version = version + 1
+        WHERE id = ${taskId}${expectedVersion !== undefined ? sql` AND version = ${expectedVersion}` : sql``}
+      `.execute(trx as any);
+      const numUpdated = (result as any).numUpdatedRows ?? (result as any).numAffectedRows ?? 0n;
+      if (typeof numUpdated === 'bigint' && numUpdated === ZERO) {
+        throw new ApiError(409, 'STALE_VERSION');
+      }
+      // Handle tagNames if provided
+      if (tagNames !== undefined) {
+        // Resolve/create tags and set associations
+        const project = await sql`SELECT owner_id FROM projects WHERE id = ${taskRow.project_id}`.execute(trx as any);
+        const projectRow = (project.rows as any[])[0];
+        if (!projectRow) throw new ApiError(404, 'NOT_FOUND');
+        const ownerId = projectRow.owner_id;
+        if (tagNames.length > 0) {
+          const tagIds = await this.resolveOrCreateTags(ownerId, tagNames, trx as any);
+          await this.setTaskTags(taskId, tagIds, trx as any);
+        } else {
+          // Empty array means remove all tags
+          await this.setTaskTags(taskId, [], trx as any);
+        }
+      }
+      // Readback
+      const updatedRow = await sql`SELECT * FROM tasks WHERE id = ${taskId}`.execute(trx as any);
+      const rows = updatedRow.rows as any[];
+      if (!rows[0]) throw new ApiError(404, 'NOT_FOUND');
+      const tags = tagNames !== undefined
+        ? await this.getTaskTags(taskId, trx as any)
+        : await this.getTaskTags(taskId, trx as any);
+      return { ...rows[0] as TaskRow, tags };
+    });
   }
 
   async deleteTask(taskId: string, expectedVersion?: number): Promise<void> {
@@ -686,7 +763,9 @@ export class Repository {
       const updatedResult = await sql`SELECT * FROM tasks WHERE id = ${taskId}`.execute(trx as any);
       const updatedRow = (updatedResult.rows as any[])[0];
       if (!updatedRow) throw new ApiError(404, 'NOT_FOUND');
-      return updatedRow as TaskRow;
+      // Hydrate tags for the moved task
+      const tags = await this.getTaskTags(taskId, trx as any);
+      return { ...updatedRow as TaskRow, tags };
     });
   }
 
@@ -745,8 +824,197 @@ export class Repository {
       // Readback the task
       const updated = await sql`SELECT * FROM tasks WHERE id = ${taskId}`.execute(trx as any);
       const rows = updated.rows as any[];
-      return rows[0] as TaskRow;
+      const tags = await this.getTaskTags(taskId, trx as any);
+      return { ...rows[0] as TaskRow, tags };
     });
+  }
+
+  // --- Tag ops ---
+
+  async listTags(userId: string): Promise<TagRow[]> {
+    const result = await sql`SELECT * FROM tags WHERE user_id = ${userId} ORDER BY name ASC`.execute(this.db);
+    return result.rows as any[] as TagRow[];
+  }
+
+  async getTagById(tagId: string): Promise<TagRow | null> {
+    const result = await sql`SELECT * FROM tags WHERE id = ${tagId}`.execute(this.db);
+    const rows = result.rows as any[];
+    return rows?.[0] || null;
+  }
+
+  async getTagByNormalizedName(userId: string, normalizedName: string): Promise<TagRow | null> {
+    const result = await sql`SELECT * FROM tags WHERE user_id = ${userId} AND normalized_name = ${normalizedName}`.execute(this.db);
+    const rows = result.rows as any[];
+    return rows?.[0] || null;
+  }
+
+  // Deterministic color from normalized name
+  private getColorForTag(normalizedName: string): string {
+    return tagColorFromName(normalizedName);
+  }
+
+  // Create a tag atomically, resolving races with UNIQUE constraint
+  async createTag(userId: string, name: string): Promise<TagRow> {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const normalizedName = name.toLowerCase().trim();
+    const color = this.getColorForTag(normalizedName);
+    await sql`
+      INSERT INTO tags (id, user_id, name, normalized_name, color, version, created_at, updated_at)
+      VALUES (${id}, ${userId}, ${name}, ${normalizedName}, ${color}, 0, ${now}, ${now})
+    `.execute(this.db);
+    return {
+      id, user_id: userId, name, normalized_name: normalizedName, color, version: 0,
+      created_at: now, updated_at: now,
+    };
+  }
+
+  async updateTag(tagId: string, name: string, color: string, userId: string, expectedVersion?: number): Promise<TagRow> {
+    // Atomic: check ownership and version in the WHERE clause
+    const now = new Date().toISOString();
+    const normalizedName = name.toLowerCase().trim();
+    const result = await sql`
+      UPDATE tags SET name = ${name}, normalized_name = ${normalizedName}, color = ${color}, version = version + 1, updated_at = ${now}
+      WHERE id = ${tagId} AND user_id = ${userId}${expectedVersion !== undefined ? sql` AND version = ${expectedVersion}` : sql``}
+    `.execute(this.db);
+    const numUpdated = (result as any).numUpdatedRows ?? (result as any).numAffectedRows ?? 0n;
+    if (typeof numUpdated === 'bigint' && numUpdated === ZERO) {
+      // Check whether the tag exists at all
+      const existing = await this.getTagById(tagId);
+      if (!existing || existing.user_id !== userId) {
+        throw new ApiError(404, 'NOT_FOUND');
+      }
+      throw new ApiError(409, 'STALE_VERSION');
+    }
+    const updated = await this.getTagById(tagId);
+    if (!updated) throw new ApiError(404, 'NOT_FOUND');
+    return updated;
+  }
+
+  async deleteTag(tagId: string, userId: string, expectedVersion?: number): Promise<void> {
+    // Atomic: check ownership and version in the WHERE clause
+    const result = await sql`
+      DELETE FROM tags WHERE id = ${tagId} AND user_id = ${userId}${expectedVersion !== undefined ? sql` AND version = ${expectedVersion}` : sql``}
+    `.execute(this.db);
+    const numDeleted = (result as any).numDeletedRows ?? (result as any).numAffectedRows ?? 0n;
+    if (typeof numDeleted === 'bigint' && numDeleted === ZERO) {
+      // Check whether the tag exists at all
+      const existing = await this.getTagById(tagId);
+      if (!existing || existing.user_id !== userId) {
+        throw new ApiError(404, 'NOT_FOUND');
+      }
+      throw new ApiError(409, 'STALE_VERSION');
+    }
+  }
+
+  // Resolve or create tags for given tag names, returning their IDs
+  // Used atomically within a transaction. Deduplicates within the batch.
+  async resolveOrCreateTags(userId: string, tagNames: string[], trx: Kysely<any>): Promise<string[]> {
+    // Normalize, deduplicate, and sort names to minimize race conditions
+    const normalizedNames = tagNames
+      .map(name => ({ original: name.trim(), normalized: name.trim().toLowerCase() }))
+      .filter((v, i, a) => a.findIndex(x => x.normalized === v.normalized) === i);
+    // Sort normalized names for deterministic order
+    normalizedNames.sort((a, b) => a.normalized.localeCompare(b.normalized));
+    const tagIds: string[] = [];
+    for (const { original: name, normalized: normalizedName } of normalizedNames) {
+      // Use INSERT OR IGNORE (SQLite) / ON CONFLICT DO NOTHING (Postgres) to atomically create
+      // The UNIQUE constraint on (user_id, normalized_name) prevents duplicates
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      const color = this.getColorForTag(normalizedName);
+      await sql`
+        INSERT INTO tags (id, user_id, name, normalized_name, color, version, created_at, updated_at)
+        VALUES (${id}, ${userId}, ${name}, ${normalizedName}, ${color}, 0, ${now}, ${now})
+        ON CONFLICT(user_id, normalized_name) DO NOTHING
+      `.execute(trx as any);
+      // Now select winner - either the existing tag or the one we just inserted
+      const winnerResult = await sql`
+        SELECT id FROM tags WHERE user_id = ${userId} AND normalized_name = ${normalizedName}
+      `.execute(trx as any);
+      const winnerRow = (winnerResult.rows as any[])[0];
+      if (!winnerRow) throw new ApiError(500, 'INTERNAL_ERROR', 'Tag creation/resolution failed');
+      tagIds.push(winnerRow.id);
+    }
+    return tagIds;
+  }
+
+  // Attach tags to a task, replacing all existing associations
+  async setTaskTags(taskId: string, tagIds: string[], trx: Kysely<any>): Promise<void> {
+    // Remove all existing associations
+    await sql`DELETE FROM task_tags WHERE task_id = ${taskId}`.execute(trx as any);
+    // Insert new associations
+    if (tagIds.length > 0) {
+      const now = new Date().toISOString();
+      for (const tagId of tagIds) {
+        await sql`
+          INSERT INTO task_tags (task_id, tag_id, created_at) VALUES (${taskId}, ${tagId}, ${now})
+        `.execute(trx as any);
+      }
+    }
+  }
+
+  // Get tag rows for a task
+  async getTaskTags(taskId: string, trx?: Kysely<any>): Promise<TagRow[]> {
+    const exec = trx || this.db;
+    const result = await sql`
+      SELECT t.* FROM tags t
+      JOIN task_tags tt ON t.id = tt.tag_id
+      WHERE tt.task_id = ${taskId}
+      ORDER BY t.normalized_name ASC, t.id ASC
+    `.execute(exec as any);
+    return result.rows as any[] as TagRow[];
+  }
+
+  // Batch hydrate tasks with tags - avoids N+1
+  async hydrateTaskTags(tasks: TaskRow[]): Promise<(TaskRow & { tags: TagRow[] })[]> {
+    if (tasks.length === 0) return tasks as any[];
+    const taskIds = tasks.map(t => t.id);
+    // Fetch all tag associations for these tasks
+    const assocResult = await sql`
+      SELECT tt.task_id, tt.tag_id FROM task_tags tt WHERE tt.task_id IN (${sql.join(taskIds.map(id => sql`${id}`))})
+    `.execute(this.db);
+    const assocRows = assocResult.rows as any[] as TaskTagRow[];
+    // Build task->tagIds map
+    const taskTagMap = new Map<string, string[]>();
+    for (const row of assocRows) {
+      const existing = taskTagMap.get(row.task_id);
+      if (existing) {
+        existing.push(row.tag_id);
+      } else {
+        taskTagMap.set(row.task_id, [row.tag_id]);
+      }
+    }
+    // Fetch all tags involved (deduplicate tag IDs)
+    const tagIdSet = new Set<string>();
+    for (const ids of taskTagMap.values()) {
+      for (const id of ids) {
+        tagIdSet.add(id);
+      }
+    }
+    const tagIds = Array.from(tagIdSet);
+    let tags: TagRow[] = [];
+    if (tagIds.length > 0) {
+      const tagResult = await sql`
+        SELECT * FROM tags WHERE id IN (${sql.join(tagIds.map(id => sql`${id}`))})
+      `.execute(this.db);
+      tags = tagResult.rows as any[] as TagRow[];
+    }
+    // Build tag lookup
+    const tagMap = new Map<string, TagRow>();
+    for (const tag of tags) {
+      tagMap.set(tag.id, tag);
+    }
+    // Attach tags to tasks, sorted by normalized_name then id
+    const hydrated = tasks.map(task => {
+      const taskTagIds = taskTagMap.get(task.id) || [];
+      const taskTags = taskTagIds
+        .map(tid => tagMap.get(tid))
+        .filter((t): t is TagRow => t !== undefined)
+        .sort((a, b) => (a.normalized_name ?? '').localeCompare(b.normalized_name ?? '') || (a.id ?? '').localeCompare(b.id ?? ''));
+      return { ...task, tags: taskTags };
+    });
+    return hydrated;
   }
 
   // --- API Token ops ---

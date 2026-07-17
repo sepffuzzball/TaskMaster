@@ -19,6 +19,7 @@ export default function LaneCard({
   wholeLaneTarget = false,
   laneDropEdge = 'none',
   hasTaskActive = false,
+  taskDragDisabled = false,
 }: {
   lane: Lane;
   tasks: Task[];
@@ -36,6 +37,7 @@ export default function LaneCard({
   laneDropEdge?: LaneDropEdge;
   /** A task drag is in progress (suppress per-task indicators if needed). */
   hasTaskActive?: boolean;
+  taskDragDisabled?: boolean;
 }) {
   const dragData = { type: 'lane', laneId: lane.id, name: lane.name, version: lane.version };
   const draggable = useDraggable({ id: lane.id, data: dragData });
@@ -126,6 +128,7 @@ export default function LaneCard({
               onDelete={() => onDeleteTask(task.id)}
               insertIndicator={hasTaskActive && taskOverTaskId === task.id ? 'before' : 'none'}
               wholeLaneTarget={wholeLaneTarget}
+              dragDisabled={taskDragDisabled}
             />
           ))
         )}

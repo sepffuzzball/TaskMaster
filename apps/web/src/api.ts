@@ -28,6 +28,7 @@ type Project = import('./types').Project;
 type Lane = import('./types').Lane;
 type Task = import('./types').Task;
 type ApiToken = import('./types').ApiToken;
+type Tag = import('./types').Tag;
 
 export const api = {
   auth: {
@@ -71,12 +72,12 @@ export const api = {
     },
     get: (projectId: string, taskId: string) =>
       request<Task>(`/projects/${projectId}/tasks/${taskId}`),
-    create: (projectId: string, laneId: string, data: { title: string; description?: string }) =>
+    create: (projectId: string, laneId: string, data: { title: string; description?: string; tagNames?: string[] }) =>
       request<Task>(`/projects/${projectId}/lanes/${laneId}/tasks`, {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (projectId: string, taskId: string, data: { title?: string; description?: string; expectedVersion: number }) =>
+    update: (projectId: string, taskId: string, data: { title?: string; description?: string; tagNames?: string[]; expectedVersion: number }) =>
       request<Task>(`/projects/${projectId}/tasks/${taskId}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -116,5 +117,12 @@ export const api = {
       }),
     revoke: (tokenId: string) =>
       request<{ success: boolean }>(`/auth/tokens/${tokenId}/revoke`, { method: 'POST' }),
+  },
+  tags: {
+    list: () => request<Tag[]>('/tags'),
+    update: (tagId: string, data: { name?: string; color?: string; expectedVersion: number }) =>
+      request<Tag>(`/tags/${tagId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (tagId: string, expectedVersion: number) =>
+      request<{ success: boolean }>(`/tags/${tagId}?expectedVersion=${expectedVersion}`, { method: 'DELETE' }),
   },
 };

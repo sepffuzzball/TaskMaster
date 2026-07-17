@@ -28,8 +28,8 @@ export async function registerMcpRoutes(app: FastifyInstance) {
   const renameLaneInput = z.object({ laneId: z.string(), projectId: z.string(), name: z.string(), expectedVersion: z.number().int(), expectedProjectVersion: z.number().int() });
   const reorderLanesInput = z.object({ projectId: z.string(), laneIds: z.array(z.string()), expectedProjectVersion: z.number().int() });
   const listTasksInput = z.object({ projectId: z.string(), laneId: z.string().optional() });
-  const createTaskInput = z.object({ projectId: z.string(), laneId: z.string(), title: z.string(), description: z.string().optional() });
-  const updateTaskInput = z.object({ taskId: z.string(), title: z.string().optional(), description: z.string().optional(), expectedVersion: z.number().int() });
+  const createTaskInput = z.object({ projectId: z.string(), laneId: z.string(), title: z.string(), description: z.string().optional(), tagNames: z.array(z.string()).optional() });
+  const updateTaskInput = z.object({ taskId: z.string(), title: z.string().optional(), description: z.string().optional(), tagNames: z.array(z.string()).optional(), expectedVersion: z.number().int() });
   const moveTaskInput = z.object({ taskId: z.string(), destinationProjectId: z.string(), destinationLaneId: z.string().optional(), beforeTaskId: z.string().optional(), afterTaskId: z.string().optional(), expectedVersion: z.number().int() });
   const deleteLaneInput = z.object({ projectId: z.string(), laneId: z.string(), destinationLaneId: z.string(), expectedProjectVersion: z.number().int() });
   const moveTaskToNewProjectInput = z.object({ taskId: z.string(), projectName: z.string(), expectedVersion: z.number().int() });

@@ -79,6 +79,16 @@ export const Lane = z.object({
 });
 export type Lane = z.infer<typeof Lane>;
 
+export const Tag = z.object({
+  id: uuid,
+  name: z.string().max(32).regex(/^[0-9A-Za-z\-_]+$/, { message: 'Tag name must contain ASCII letters, digits, hyphen or underscore only' }),
+  color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, { message: 'Color must be a valid hex color (#RRGGBB)' }),
+  version: version,
+  createdAt: iso8601,
+  updatedAt: iso8601,
+});
+export type Tag = z.infer<typeof Tag>;
+
 export const Task = z.object({
   id: uuid,
   projectId: uuid,
@@ -87,6 +97,7 @@ export const Task = z.object({
   description: z.string().max(1000).optional(),
   rank: z.number().int().nonnegative(),
   version: version,
+  tags: z.array(Tag).default([]),
   createdAt: iso8601,
   updatedAt: iso8601,
 });
@@ -139,12 +150,14 @@ export type UpdateLaneInput = z.infer<typeof UpdateLaneInput>;
 export const CreateTaskInput = z.object({
   title: z.string().max(200),
   description: z.string().max(1000).optional(),
+  tagNames: z.array(z.string().max(32).regex(/^[0-9A-Za-z\-_]+$/)).max(10).optional(),
 });
 export type CreateTaskInput = z.infer<typeof CreateTaskInput>;
 
 export const UpdateTaskInput = z.object({
   title: z.string().max(200).optional(),
   description: z.string().max(1000).optional(),
+  tagNames: z.array(z.string().max(32).regex(/^[0-9A-Za-z\-_]+$/)).max(10).optional(),
   expectedVersion: version,
 });
 export type UpdateTaskInput = z.infer<typeof UpdateTaskInput>;
@@ -175,6 +188,13 @@ export const DeleteLaneInput = z.object({
   expectedProjectVersion: version,
 });
 export type DeleteLaneInput = z.infer<typeof DeleteLaneInput>;
+
+export const UpdateTagInput = z.object({
+  name: z.string().max(32).regex(/^[0-9A-Za-z\-_]+$/).optional(),
+  color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, { message: 'Color must be a valid hex color (#RRGGBB)' }).optional(),
+  expectedVersion: version,
+});
+export type UpdateTagInput = z.infer<typeof UpdateTagInput>;
 
 // --- Auth Inputs ---
 

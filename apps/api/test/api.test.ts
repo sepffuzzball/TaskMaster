@@ -38,12 +38,19 @@ describe('API behavior tests', () => {
     setTestEnv();
     // Run migrations on test DB - use the migration module
     const db = createDb();
-    // Run the migration using the real migration file
-    const migration = await import('@taskmaster/db/migrations/001-initial');
-    await migration.up(db as any);
+    // Run the migration using the real migration files
+    const migration001 = await import('@taskmaster/db/migrations/001-initial');
+    await migration001.up(db as any);
+    const migration002 = await import('@taskmaster/db/migrations/002-oidc-transactions');
+    await migration002.up(db as any);
+    const migration003 = await import('@taskmaster/db/migrations/003-task-tags');
+    await migration003.up(db as any);
     app = await buildApp();
     await app.ready();
     repo = new Repository(db);
+
+    // Create dev-bypass user for auth bypass
+    await repo.upsertUser('dev-bypass-issuer', 'dev-bypass');
   });
 
   afterAll(async () => {
@@ -682,7 +689,8 @@ describe('API behavior tests', () => {
     const lane = await repo.createLane(project.id, 'Backlog', 0);
     const task = await repo.createTask(project.id, lane.id, 'Task1');
     try {
-      await repo.updateTask(task.id, 'Updated title', undefined, 999);
+      // Call with tagNames undefined and expectedVersion 999 to trigger stale check
+      await repo.updateTask(task.id, 'Updated title', undefined, undefined, 999);
       expect.fail('Should throw STALE_VERSION');
     } catch (e: any) {
       expect(e.code).toBe('STALE_VERSION');
@@ -1095,6 +1103,165 @@ describe('API behavior tests', () => {
       const body = JSON.parse(reply.body);
       expect(body.errors[0].code).toBe('OIDC_TOKEN_EXCHANGE_FAILED');
       expect(body.errors[0].message).toBe('Unable to complete sign-in');
+    });
+  });
+
+  describe('Tag CRUD', () => {
+    let bypassUserId: string;
+
+    beforeAll(async () => {
+      // Reuse the dev-bypass user created in the outer beforeAll for route auth
+      const user = await repo.getUserBySubject('dev-bypass');
+      if (!user) throw new Error('dev-bypass user not found');
+      bypassUserId = user.id;
+    });
+
+    it('GET /tags returns user tags', async () => {
+      // Create a tag first so there is something to list
+      await repo.createTag(bypassUserId, 'apple');
+      const reply = await app.inject({ url: '/api/v1/tags' });
+      expect(reply.statusCode).toBe(200);
+      const body = JSON.parse(reply.body);
+      expect(Array.isArray(body)).toBe(true);
+      // Clean up
+      const tags = await repo.listTags(bypassUserId);
+      for (const t of tags) await repo.deleteTag(t.id, bypassUserId, t.version);
+    });
+
+    it('PUT /tags/:id updates a tag', async () => {
+      const tag = await repo.createTag(bypassUserId, 'test-tag-put');
+      const reply = await app.inject({
+        url: `/api/v1/tags/${tag.id}`,
+        method: 'PUT',
+        payload: { name: 'updated-name', color: '#F56565', expectedVersion: tag.version },
+      });
+      expect(reply.statusCode).toBe(200);
+      const body = JSON.parse(reply.body);
+      expect(body.name).toBe('updated-name');
+      // Clean up - get the tag back to find its version after update
+      const updatedTag = await repo.getTagById(tag.id);
+      if (updatedTag) {
+        await repo.deleteTag(tag.id, bypassUserId, updatedTag.version);
+      }
+    });
+
+    it('DELETE /tags/:id deletes a tag', async () => {
+      const tag = await repo.createTag(bypassUserId, 'test-tag-del');
+      const reply = await app.inject({
+        url: `/api/v1/tags/${tag.id}?expectedVersion=${tag.version}`,
+        method: 'DELETE',
+      });
+      expect(reply.statusCode).toBe(200);
+      const body = JSON.parse(reply.body);
+      expect(body.success).toBe(true);
+      const deleted = await repo.getTagById(tag.id);
+      expect(deleted).toBeNull();
+    });
+
+    // Additional tag ownership/stale tests
+    it('DELETE /tags/:id with wrong owner returns NOT_FOUND', async () => {
+      const tag = await repo.createTag(bypassUserId, 'test-tag-other');
+      // Simulate wrong owner by injecting a wrong ownerId
+      const wrongUserId = randomUUID();
+      try {
+        await repo.deleteTag(tag.id, wrongUserId, tag.version);
+        expect.fail('Should throw NOT_FOUND');
+      } catch (e: any) {
+        expect(e.code).toBe('NOT_FOUND');
+      }
+      // Clean up
+      await repo.deleteTag(tag.id, bypassUserId, tag.version);
+    });
+
+    it('DELETE /tags/:id with stale version returns STALE_VERSION', async () => {
+      const tag = await repo.createTag(bypassUserId, 'test-tag-stale');
+      try {
+        await repo.deleteTag(tag.id, bypassUserId, 999);
+        expect.fail('Should throw STALE_VERSION');
+      } catch (e: any) {
+        expect(e.code).toBe('STALE_VERSION');
+      }
+      // Clean up
+      await repo.deleteTag(tag.id, bypassUserId, tag.version);
+    });
+
+    it('PUT /tags/:id with wrong owner throws NOT_FOUND', async () => {
+      const tag = await repo.createTag(bypassUserId, 'test-tag-own');
+      try {
+        await repo.updateTag(tag.id, 'wrong-owner-update', '#F56565', randomUUID(), tag.version);
+        expect.fail('Should throw NOT_FOUND');
+      } catch (e: any) {
+        expect(e.code).toBe('NOT_FOUND');
+      }
+      // Clean up
+      await repo.deleteTag(tag.id, bypassUserId, tag.version);
+    });
+
+    it('PUT /tags/:id with stale version throws STALE_VERSION', async () => {
+      const tag = await repo.createTag(bypassUserId, 'test-tag-stale2');
+      try {
+        await repo.updateTag(tag.id, 'stale-update', '#F56565', bypassUserId, 999);
+        expect.fail('Should throw STALE_VERSION');
+      } catch (e: any) {
+        expect(e.code).toBe('STALE_VERSION');
+      }
+      // Clean up
+      await repo.deleteTag(tag.id, bypassUserId, tag.version);
+    });
+  });
+
+  describe('Task creation with tags', () => {
+    let bypassUserId: string;
+    let testProjectId: string;
+    let testLaneId: string;
+
+    beforeAll(async () => {
+      // Reuse the dev-bypass user created in the outer beforeAll for route auth
+      const user = await repo.getUserBySubject('dev-bypass');
+      if (!user) throw new Error('dev-bypass user not found');
+      bypassUserId = user.id;
+
+      // Create a project and lane for task tests
+      const project = await repo.createProject(bypassUserId, 'TaskTagRouteProj');
+      testProjectId = project.id;
+      const lanes = await repo.listLanes(project.id);
+      testLaneId = lanes[0].id;
+    });
+
+    it('creates task with tagNames in input', async () => {
+      const reply = await app.inject({
+        url: `/api/v1/projects/${testProjectId}/lanes/${testLaneId}/tasks`,
+        method: 'POST',
+        payload: { title: 'Task with tags', tagNames: ['bug', 'feature'] },
+      });
+      expect(reply.statusCode).toBe(201);
+      const body = JSON.parse(reply.body);
+      expect(body.tags).toBeDefined();
+      expect(body.tags).toHaveLength(2);
+      // Clean up
+      await repo.deleteTask(body.id);
+    });
+
+    it('updates task tags', async () => {
+      const createReply = await app.inject({
+        url: `/api/v1/projects/${testProjectId}/lanes/${testLaneId}/tasks`,
+        method: 'POST',
+        payload: { title: 'Task with tags', tagNames: ['bug'] },
+      });
+      const task = JSON.parse(createReply.body);
+
+      const updateReply = await app.inject({
+        url: `/api/v1/projects/${testProjectId}/tasks/${task.id}`,
+        method: 'PUT',
+        payload: { tagNames: ['feature'], expectedVersion: task.version },
+      });
+      expect(updateReply.statusCode).toBe(200);
+      const updated = JSON.parse(updateReply.body);
+      expect(updated.tags).toHaveLength(1);
+      expect(updated.tags[0].name).toBe('feature');
+
+      // Clean up
+      await repo.deleteTask(updated.id);
     });
   });
 });

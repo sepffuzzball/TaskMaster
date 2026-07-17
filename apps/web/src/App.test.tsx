@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import App, { createKeyboardCoordinateGetter } from './App';
+import SettingsDialog from './components/SettingsDialog';
 import { mockFetch } from './test/setup';
 import { Root } from './main';
 
@@ -151,6 +152,32 @@ async function openBoard(user: any) {
 }
 
 describe('App', () => {
+  it('confirms token creation and copying and warns that the secret is shown once', async () => {
+    global.fetch = apiMock([
+      { match: (url, opts) => url.endsWith('/auth/tokens') && !opts?.method, response: () => mockFetchResponse([]) },
+      { match: (url) => url.endsWith('/tags'), response: () => mockFetchResponse([]) },
+      { match: (url, opts) => url.endsWith('/auth/tokens') && opts?.method === 'POST', response: () => mockFetchResponse({ token: 'secret-token', apiToken: { id: 'token-1', name: 'CLI', prefix: 'secret', scopes: ['read'], revokedAt: null, createdAt: '' } }) },
+    ]);
+    const clipboardWrite = vi.fn().mockResolvedValue(undefined);
+    const toastMessages: string[] = [];
+    const onToast = (event: Event) => toastMessages.push((event as CustomEvent).detail.message);
+    window.addEventListener('toast', onToast);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><SettingsDialog onClose={vi.fn()} /></QueryClientProvider>);
+    const user = await userEvent.setup();
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: clipboardWrite } });
+
+    await user.type(screen.getByLabelText('Token name'), 'CLI');
+    await user.click(screen.getByRole('button', { name: 'Create Token' }));
+    expect(await screen.findByText('This secret will not be shown again. Store it safely.')).toBeTruthy();
+    expect(toastMessages).toContain('Token created');
+
+    await user.click(screen.getByRole('button', { name: 'Copy secret' }));
+    expect(clipboardWrite).toHaveBeenCalledWith('secret-token');
+    expect(toastMessages).toContain('Copied');
+    window.removeEventListener('toast', onToast);
+  });
+
   it('shows login when unauthenticated (401)', async () => {
     global.fetch = vi.fn(() =>
       Promise.resolve({
@@ -1335,5 +1362,43 @@ describe('App', () => {
       const headings = screen.getAllByRole('heading');
       expect(headings.some(h => h.textContent === 'Not authenticated')).toBe(true);
     });
+  });
+
+  it('creates a task with separator-entered tag names', async () => {
+    const mockedFetch = boardMock([
+      { match: url => url.endsWith('/tags'), response: () => mockFetchResponse([{ id: 'tag1', name: 'urgent', color: '#f4476b', version: 1, createdAt: '', updatedAt: '' }]) },
+      { match: (url, options) => url.endsWith('/projects/proj1/lanes/lane1/tasks') && options?.method === 'POST', response: () => mockFetchResponse({ id: 'new', title: 'Tagged task', tags: [] }) },
+    ], { lanes: [{ id: 'lane1', name: 'Lane 1', version: 1, projectId: 'proj1', rank: 0, createdAt: '', updatedAt: '' }] });
+    global.fetch = mockedFetch;
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+    await user.click(await screen.findByRole('button', { name: 'Add Task' }));
+    await user.type(screen.getByLabelText('Title'), 'Tagged task');
+    await user.type(screen.getByRole('combobox', { name: 'Tags' }), 'urgent,');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => {
+      const call = vi.mocked(mockedFetch).mock.calls.find((item: any) => item[0].endsWith('/projects/proj1/lanes/lane1/tasks') && item[1]?.method === 'POST');
+      expect(JSON.parse(call![1].body).tagNames).toEqual(['urgent']);
+    });
+  });
+
+  it('filters tasks by title and tag, disables task drag, and clears search', async () => {
+    const tasks = [
+      { id: 'task1', title: 'Write report', version: 1, projectId: 'proj1', laneId: 'lane1', rank: 0, tags: [{ id: 'tag1', name: 'finance', color: '#f9c440', version: 1 }], createdAt: '', updatedAt: '' },
+      { id: 'task2', title: 'Ship release', version: 1, projectId: 'proj1', laneId: 'lane1', rank: 1, tags: [{ id: 'tag2', name: 'launch', color: '#4c8ddb', version: 1 }], createdAt: '', updatedAt: '' },
+    ];
+    global.fetch = boardMock([], { lanes: [{ id: 'lane1', name: 'Lane 1', version: 1, projectId: 'proj1', rank: 0, createdAt: '', updatedAt: '' }], tasks });
+    renderApp();
+    const user = await userEvent.setup();
+    await openBoard(user);
+    const search = await screen.findByLabelText('Search tasks by title or tag');
+    await user.type(search, 'finance');
+    expect(screen.getByText('Write report')).toBeTruthy();
+    expect(screen.queryByText('Ship release')).toBeNull();
+    expect(screen.getByLabelText('Drag task Write report')).toBeDisabled();
+    await user.click(screen.getByLabelText('Clear task search'));
+    expect(await screen.findByText('Ship release')).toBeTruthy();
+    expect(screen.getByLabelText('Drag task Write report')).not.toBeDisabled();
   });
 });

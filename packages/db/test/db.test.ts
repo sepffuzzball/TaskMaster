@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { Repository, createDb, getDialect, ApiError, x0n } from '../dist/index.js';
 import { up as migrationUp, down as migrationDown } from '../dist/migrations/001-initial.js';
+import { up as migration003Up } from '../dist/migrations/003-task-tags.js';
 import { sql } from 'kysely';
 import { randomUUID } from 'crypto';
 import path from 'path';
@@ -24,6 +25,7 @@ describe('db package', () => {
     setTestEnv();
     const db = createDb();
     await migrationUp(db);
+    await migration003Up(db);
     repo = new Repository(db);
   });
 
@@ -358,4 +360,345 @@ describe('db package', () => {
       });
     }
   });
+describe('Tag operations', () => {
+  let repo: Repository;
+  let userId: string;
+  let testDbPath: string;
+  let db: any;
+
+  // Helper to create a test user for tag operations with unique issuer/subject
+  async function createTestUser(repo: Repository): Promise<string> {
+    const suffix = randomUUID();
+    const user = await repo.upsertUser('test-tag-user-' + suffix, 'test-tag-subj-' + suffix);
+    return user.id;
+  }
+
+  function setTestEnv() {
+    process.env.DB_DIALECT = 'sqlite';
+    testDbPath = '/tmp/test-tag-db-' + randomUUID() + '.db';
+    process.env.SQLITE_PATH = testDbPath;
+    process.env.NODE_ENV = 'test';
+  }
+
+  beforeAll(async () => {
+    setTestEnv();
+    db = createDb();
+    // Apply both 001 and 003 migrations in order
+    await migrationUp(db);
+    await migration003Up(db);
+    repo = new Repository(db);
+  });
+
+  afterAll(async () => {
+    if (db) {
+      await db.destroy();
+    }
+    // Clean up temp files
+    ['', '-wal', '-shm'].forEach(suffix => {
+      try { unlinkSync(testDbPath + suffix); } catch {}
+    });
+  });
+
+  beforeEach(async () => {
+    userId = await createTestUser(repo);
+  });
+
+  afterEach(async () => {
+    // Clean up tags created by the test - tags cascade delete from user, but
+    // we don't delete the user since projects/lanes/tasks reference it
+    const tags = await repo.listTags(userId);
+    for (const tag of tags) {
+      try { await repo.deleteTag(tag.id, userId, tag.version); } catch {}
+    }
+  });
+
+  describe('createTag', () => {
+    it('creates a tag with deterministic color', async () => {
+      const tag = await repo.createTag(userId, 'bug');
+      expect(tag.name).toBe('bug');
+      expect(tag.normalized_name).toBe('bug');
+      expect(tag.color).toBeTruthy();
+      expect(tag.color).toMatch(/^#[0-9A-Fa-f]{6}$/);
+      expect(tag.version).toBe(0);
+      expect(tag.user_id).toBe(userId);
+    });
+
+    it('creates tag with normalized name', async () => {
+      const tag = await repo.createTag(userId, '  BUG  ');
+      expect(tag.name).toBe('  BUG  ');
+      expect(tag.normalized_name).toBe('bug');
+    });
+
+    it('enforces unique normalized name per user', async () => {
+      await repo.createTag(userId, 'bug');
+      await expect(repo.createTag(userId, 'BUG')).rejects.toThrow();
+    });
+
+    it('allows same name across different users', async () => {
+      const userId2 = await createTestUser(repo);
+      await repo.createTag(userId, 'bug');
+      const tag2 = await repo.createTag(userId2, 'bug');
+      expect(tag2.user_id).toBe(userId2);
+      await repo.deleteTag(tag2.id, userId2, tag2.version);
+      await sql`DELETE FROM users WHERE id = ${userId2}`.execute(db);
+    });
+  });
+
+  describe('resolveOrCreateTags', () => {
+    it('resolves existing tags and creates new ones', async () => {
+      await repo.createTag(userId, 'bug');
+      const ids = await repo.resolveOrCreateTags(userId, ['bug', 'feature'], db);
+      expect(ids).toHaveLength(2);
+      // 'bug' should be resolved, 'feature' should be created
+      const bugTag = await repo.getTagByNormalizedName(userId, 'bug');
+      expect(ids[0]).toBe(bugTag!.id);
+    });
+
+    it('deduplicates within batch (same name twice)', async () => {
+      const ids = await repo.resolveOrCreateTags(userId, ['bug', 'bug'], db);
+      expect(ids).toHaveLength(1);
+    });
+
+    it('handles concurrent creation (simulated via sequential attempt)', async () => {
+      // Test that resolveOrCreateTags does not throw on duplicate
+      // by creating the same tag twice simultaneously (simulated sequentially)
+      const ids1 = await repo.resolveOrCreateTags(userId, ['concurrent'], db);
+      const ids2 = await repo.resolveOrCreateTags(userId, ['concurrent'], db);
+      expect(ids1).toHaveLength(1);
+      expect(ids2).toHaveLength(1);
+      // Both should return the same tag ID
+      expect(ids1[0]).toBe(ids2[0]);
+    });
+  });
+
+  describe('setTaskTags and getTaskTags', () => {
+    it('attaches tags to a task', async () => {
+      // Create project, lane, task
+      const project = await repo.createProject(userId, 'Test Project');
+      const projectId = project.id;
+      const projVer = project.version;
+      const laneRow = await repo.createLane(projectId, 'Test Lane', projVer);
+      const laneId = laneRow.id;
+      const task = await repo.createTask(projectId, laneId, 'Test task');
+
+      // Create tags and attach
+      const tag1 = await repo.createTag(userId, 'bug');
+      const tag2 = await repo.createTag(userId, 'feature');
+      await repo.setTaskTags(task.id, [tag1.id, tag2.id], db);
+
+      const tags = await repo.getTaskTags(task.id);
+      expect(tags).toHaveLength(2);
+      expect(tags.map(t => t.name)).toContain('bug');
+      expect(tags.map(t => t.name)).toContain('feature');
+
+      await repo.deleteTask(task.id);
+    });
+
+    it('replaces existing tags when set', async () => {
+      const project = await repo.createProject(userId, 'Test Project');
+      const projectId = project.id;
+      const projVer = project.version;
+      const laneRow = await repo.createLane(projectId, 'Test Lane', projVer);
+      const laneId = laneRow.id;
+      const task = await repo.createTask(projectId, laneId, 'Test task');
+
+      const tag1 = await repo.createTag(userId, 'bug');
+      await repo.setTaskTags(task.id, [tag1.id], db);
+
+      const tag2 = await repo.createTag(userId, 'feature');
+      await repo.setTaskTags(task.id, [tag2.id], db);
+
+      const tags = await repo.getTaskTags(task.id);
+      expect(tags).toHaveLength(1);
+      expect(tags[0].name).toBe('feature');
+
+      await repo.deleteTask(task.id);
+    });
+
+    it('removes all tags when given empty array', async () => {
+      const project = await repo.createProject(userId, 'Test Project');
+      const projectId = project.id;
+      const projVer = project.version;
+      const laneRow = await repo.createLane(projectId, 'Test Lane', projVer);
+      const laneId = laneRow.id;
+      const task = await repo.createTask(projectId, laneId, 'Test task');
+
+      const tag1 = await repo.createTag(userId, 'bug');
+      await repo.setTaskTags(task.id, [tag1.id], db);
+
+      await repo.setTaskTags(task.id, [], db);
+
+      const tags = await repo.getTaskTags(task.id);
+      expect(tags).toHaveLength(0);
+
+      await repo.deleteTask(task.id);
+    });
+  });
+
+  describe('updateTag', () => {
+    it('updates tag name and color', async () => {
+      const tag = await repo.createTag(userId, 'bug');
+      const updated = await repo.updateTag(tag.id, 'bug-fix', '#F56565', userId, tag.version);
+      expect(updated.name).toBe('bug-fix');
+      expect(updated.color).toBe('#F56565');
+      expect(updated.version).toBe(tag.version + 1);
+      expect(updated.normalized_name).toBe('bug-fix');
+    });
+
+    it('throws on stale version', async () => {
+      const tag = await repo.createTag(userId, 'bug');
+      await expect(repo.updateTag(tag.id, 'bug-fix', '#F56565', userId, 999)).rejects.toThrow(ApiError);
+    });
+  });
+
+  describe('deleteTag', () => {
+    it('deletes tag', async () => {
+      const tag = await repo.createTag(userId, 'bug');
+      await repo.deleteTag(tag.id, userId, tag.version);
+      const found = await repo.getTagById(tag.id);
+      expect(found).toBeNull();
+    });
+
+    it('throws on stale version', async () => {
+      const tag = await repo.createTag(userId, 'bug');
+      await expect(repo.deleteTag(tag.id, userId, 999)).rejects.toThrow(ApiError);
+    });
+  });
+
+  describe('listTags', () => {
+    it('lists tags alphabetically', async () => {
+      await repo.createTag(userId, 'zebra');
+      await repo.createTag(userId, 'apple');
+      const tags = await repo.listTags(userId);
+      expect(tags[0].name).toBe('apple');
+      expect(tags[1].name).toBe('zebra');
+    });
+
+    it('only returns user-owned tags', async () => {
+      const userId2 = await createTestUser(repo);
+      await repo.createTag(userId2, 'apple');
+      const tags = await repo.listTags(userId);
+      expect(tags).toHaveLength(0);
+      const tags2 = await repo.listTags(userId2);
+      expect(tags2).toHaveLength(1);
+      await repo.deleteTag(tags2[0].id, userId2, tags2[0].version);
+      await sql`DELETE FROM users WHERE id = ${userId2}`.execute(db);
+    });
+  });
+
+  describe('createTask with tags', () => {
+    it('creates task with tags', async () => {
+      const project = await repo.createProject(userId, 'Test Project');
+      const projectId = project.id;
+      const projVer = project.version;
+      const laneRow = await repo.createLane(projectId, 'Test Lane', projVer);
+      const laneId = laneRow.id;
+      const task = await repo.createTask(projectId, laneId, 'Test task', undefined, undefined, ['bug', 'feature']);
+      expect(task.tags).toHaveLength(2);
+      expect(task.tags.map(t => t.name)).toContain('bug');
+      expect(task.tags.map(t => t.name)).toContain('feature');
+      await repo.deleteTask(task.id);
+    });
+
+    it('creates task without tags', async () => {
+      const project = await repo.createProject(userId, 'Test Project');
+      const projectId = project.id;
+      const projVer = project.version;
+      const laneRow = await repo.createLane(projectId, 'Test Lane', projVer);
+      const laneId = laneRow.id;
+      const task = await repo.createTask(projectId, laneId, 'Test task');
+      expect(task.tags).toHaveLength(0);
+      await repo.deleteTask(task.id);
+    });
+  });
+
+  describe('updateTask with tags', () => {
+    it('updates task tags', async () => {
+      const project = await repo.createProject(userId, 'Test Project');
+      const projectId = project.id;
+      const projVer = project.version;
+      const laneRow = await repo.createLane(projectId, 'Test Lane', projVer);
+      const laneId = laneRow.id;
+      const task = await repo.createTask(projectId, laneId, 'Test task', undefined, undefined, ['bug']);
+      expect(task.tags).toHaveLength(1);
+
+      const updated = await repo.updateTask(task.id, undefined, undefined, ['feature'], task.version);
+      expect(updated.tags).toHaveLength(1);
+      expect(updated.tags[0].name).toBe('feature');
+      expect(updated.version).toBe(task.version + 1);
+
+      await repo.deleteTask(updated.id);
+    });
+
+    it('removes tags when given empty array', async () => {
+      const project = await repo.createProject(userId, 'Test Project');
+      const projectId = project.id;
+      const projVer = project.version;
+      const laneRow = await repo.createLane(projectId, 'Test Lane', projVer);
+      const laneId = laneRow.id;
+      const task = await repo.createTask(projectId, laneId, 'Test task', undefined, undefined, ['bug']);
+
+      const updated = await repo.updateTask(task.id, undefined, undefined, [], task.version);
+      expect(updated.tags).toHaveLength(0);
+
+      await repo.deleteTask(updated.id);
+    });
+
+    it('preserves tags when tagNames not provided', async () => {
+      const project = await repo.createProject(userId, 'Test Project');
+      const projectId = project.id;
+      const projVer = project.version;
+      const laneRow = await repo.createLane(projectId, 'Test Lane', projVer);
+      const laneId = laneRow.id;
+      const task = await repo.createTask(projectId, laneId, 'Test task', undefined, undefined, ['bug']);
+
+      const updated = await repo.updateTask(task.id, 'Updated title', undefined, undefined, task.version);
+      expect(updated.tags).toHaveLength(1);
+      expect(updated.tags[0].name).toBe('bug');
+
+      await repo.deleteTask(updated.id);
+    });
+  });
+
+  describe('task tag hydration (batch)', () => {
+    it('hydrates tasks with tags', async () => {
+      const project = await repo.createProject(userId, 'Test Project');
+      const projectId = project.id;
+      const projVer = project.version;
+      const laneRow = await repo.createLane(projectId, 'Test Lane', projVer);
+      const laneId = laneRow.id;
+      const task1 = await repo.createTask(projectId, laneId, 'Task 1', undefined, undefined, ['bug']);
+      const task2 = await repo.createTask(projectId, laneId, 'Task 2', undefined, undefined, ['feature']);
+
+      const tasks = await repo.listTasks(projectId);
+      expect(tasks).toHaveLength(2);
+      // Both should have tags hydrated
+      expect(tasks[0].tags).toBeDefined();
+      expect(tasks[1].tags).toBeDefined();
+
+      await repo.deleteTask(task1.id);
+      await repo.deleteTask(task2.id);
+    });
+  });
+
+  describe('tag rename does not bump task versions', () => {
+    it('renaming tag does not affect task version', async () => {
+      const project = await repo.createProject(userId, 'Test Project');
+      const projectId = project.id;
+      const projVer = project.version;
+      const laneRow = await repo.createLane(projectId, 'Test Lane', projVer);
+      const laneId = laneRow.id;
+      const task = await repo.createTask(projectId, laneId, 'Test task', undefined, undefined, ['bug']);
+      const taskVersion = task.version;
+
+      const tag = await repo.getTagByNormalizedName(userId, 'bug');
+      await repo.updateTag(tag!.id, 'bug-fix', '#F56565', userId, tag!.version);
+
+      const updatedTask = await repo.getTaskById(task.id);
+      expect(updatedTask!.version).toBe(taskVersion);
+
+      await repo.deleteTask(task.id);
+    });
+  });
+});
 });

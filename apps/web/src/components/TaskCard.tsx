@@ -1,6 +1,7 @@
 import { Edit, Trash } from 'lucide-react';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import type { Task } from '../types';
+import TagChip from './TagChip';
 
 type InsertIndicator = 'none' | 'before';
 
@@ -11,6 +12,7 @@ export default function TaskCard({
   insertIndicator = 'none',
   wholeLaneTarget = false,
   dimmed = false,
+  dragDisabled = false,
 }: {
   task: Task;
   onEdit: () => void;
@@ -21,10 +23,11 @@ export default function TaskCard({
   wholeLaneTarget?: boolean;
   /** Visually de-emphasise non-active cards during drag (e.g. other lanes). */
   dimmed?: boolean;
+  dragDisabled?: boolean;
 }) {
   const dragData = { type: 'task', taskId: task.id, title: task.title, laneId: task.laneId, version: task.version };
-  const draggable = useDraggable({ id: task.id, data: dragData });
-  const droppable = useDroppable({ id: task.id, data: dragData });
+  const draggable = useDraggable({ id: task.id, data: dragData, disabled: dragDisabled });
+  const droppable = useDroppable({ id: task.id, data: dragData, disabled: dragDisabled });
 
   // The article root is registered as both the draggable measurement node and
   // the droppable target. It is intentionally NON-interactive (no role=button,
@@ -50,7 +53,7 @@ export default function TaskCard({
       <div
         className="task-card-header"
         onPointerDown={event => {
-          if ((event.target as Element).closest('button')) return;
+          if (dragDisabled || (event.target as Element).closest('button')) return;
           draggable.listeners?.onPointerDown?.(event);
         }}
       >
@@ -72,6 +75,7 @@ export default function TaskCard({
           {...draggable.listeners}
           aria-label={`Drag task ${task.title}`}
           title={`Drag task ${task.title}`}
+          disabled={dragDisabled}
         >
           <span className="task-drag-track" aria-hidden="true" />
         </button>
@@ -90,6 +94,9 @@ export default function TaskCard({
         <div className="task-title">{task.title}</div>
         {task.description && <div className="task-description">{task.description}</div>}
       </div>
+      {!!task.tags?.length && <div className="task-tags" aria-label={`Tags for ${task.title}`}>
+        {task.tags.map(tag => <TagChip key={tag.id} name={tag.name} color={tag.color} compact />)}
+      </div>}
     </article>
   );
 }
