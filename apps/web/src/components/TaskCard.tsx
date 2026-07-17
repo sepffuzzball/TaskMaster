@@ -2,6 +2,7 @@ import { Edit, Trash } from 'lucide-react';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import type { Task } from '../types';
 import TagChip from './TagChip';
+import TaskDescription from './TaskDescription';
 
 type InsertIndicator = 'none' | 'before';
 
@@ -92,7 +93,7 @@ export default function TaskCard({
       </div>
       <div className="task-body">
         <div className="task-title">{task.title}</div>
-        {task.description && <div className="task-description">{task.description}</div>}
+        {task.description && <TaskDescription description={task.description} />}
       </div>
       {!!task.tags?.length && <div className="task-tags" aria-label={`Tags for ${task.title}`}>
         {task.tags.map(tag => <TagChip key={tag.id} name={tag.name} color={tag.color} compact />)}

@@ -1226,7 +1226,8 @@ function AddTaskDialog({ laneId, projectId, onClose, onCreated }: {
           <TagInput value={tagNames} availableTags={tagsQuery.data || []} onChange={setTagNames} />
           <div className="form-field">
             <label htmlFor="task-description">Description (optional)</label>
-            <textarea id="task-description" value={description} onChange={e => setDescription(e.target.value)} maxLength={1000} rows={3} />
+            <textarea id="task-description" value={description} onChange={e => setDescription(e.target.value)} maxLength={1000} rows={3} aria-describedby="task-description-help" />
+            <p id="task-description-help" className="field-help markdown-help">Markdown supported</p>
           </div>
           <div className="dialog-actions">
             <button type="submit" className="btn btn-primary">Create</button>
@@ -1398,7 +1399,9 @@ function EditTaskDialog({ taskId, projectId, onClose, onUpdated }: {
                   onChange={e => setDescription(e.target.value)}
                   maxLength={1000}
                   rows={6}
+                  aria-describedby="edit-task-desc-help"
                 />
+                <p id="edit-task-desc-help" className="field-help markdown-help">Markdown supported</p>
               </div>
               <TagInput value={tagNames} availableTags={tagsQuery.data || []} onChange={setTagNames} />
             </form>
